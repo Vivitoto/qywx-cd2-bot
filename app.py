@@ -109,3 +109,68 @@ def cd2_offline_download(magnet_url):
         return False, f"gRPC错误: {e.code().name}"
     except Exception as e:
         return False, f"系统异常: {str(e)}"
+
+def process_message_async(from_user, content):
+    """后台异步处理线程"""
+    target_magnet = None
+    is_search = False
+    
+    if content.startswith("magnet:?"):
+        target_magnet = content
+    elif len(content) > 3: 
+        send_wechat_reply(from_user, f"🔍 正在本地索引库搜索【{content}】...")
+        is_search = True
+        target_magnet = search_magnet(content)
+    
+    if target_magnet:
+        success, detail = cd2_offline_download(target_magnet)
+        hash_code = target_magnet.split("urn:btih:")[1][:10].upper() + "..." if "urn:btih:" in target_magnet else "未知特征码"
+        
+        if success:
+            prefix = "✅ 本地检索并离线成功" if is_search else "✅ 离线任务已建立"
+            reply_text = f"{prefix}\n🧲 {hash_code}\n🤖 状态: {detail}"
+        else:
+            reply_text = f"❌ 离线任务失败\n⚠️ 原因: {detail}"
+            
+        send_wechat_reply(from_user, reply_text)
+    else:
+        if is_search:
+            send_wechat_reply(from_user, f"😭 抱歉，本地索引库未能找到【{content}】。建议在 Prowlarr 添加更多 Indexer。")
+        else:
+            send_wechat_reply(from_user, "💡 请发送合法的磁力链接或番号关键词。")
+
+@app.route('/wechat', methods=['GET', 'POST'])
+def wechat_callback():
+    signature = request.args.get('msg_signature', '')
+    timestamp = request.args.get('timestamp', '')
+    nonce = request.args.get('nonce', '')
+
+    if request.method == 'GET':
+        echostr = request.args.get('echostr', '')
+        try:
+            return crypto.check_signature(signature, timestamp, nonce, echostr)
+        except Exception as e:
+            return f"验证失败: {e}", 403
+
+    if request.method == 'POST':
+        try:
+            msg_xml = crypto.decrypt_message(request.data, signature, timestamp, nonce)
+            tree = ET.fromstring(msg_xml)
+            
+            # --- 消息防重复逻辑 ---
+            msg_id_node = tree.find('MsgId')
+            if msg_id_node is not None:
+                msg_id = msg_id_node.text
+                if msg_id in recent_msg_ids:
+                    return "success"
+                recent_msg_ids.append(msg_id)
+                if len(recent_msg_ids) > 100:
+                    recent_msg_ids.pop(0)
+            
+            msg_type = tree.find('MsgType').text
+            from_user = tree.find('FromUserName').text
+            
+            if msg_type == 'text':
+                content = tree.find('Content').text.strip()
+                # 开启新线程去处理业务，主线程秒回微信防止重复提醒
+                threading.Thread(target=process_message
