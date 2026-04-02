@@ -24,10 +24,13 @@ CD2_HOST = os.getenv("CD2_HOST", "192.168.1.10:19798").replace("http://", "").re
 CD2_TOKEN = os.getenv("CD2_TOKEN")
 DOWNLOAD_PATH = os.getenv("DOWNLOAD_PATH")
 
+# --- 3. Prowlarr 聚合搜索配置 ---
+PROWLARR_URL = os.getenv("PROWLARR_URL", "http://192.168.1.10:9696").rstrip("/")
+PROWLARR_API_KEY = os.getenv("PROWLARR_API_KEY")
+
 crypto = WeChatCrypto(APP_TOKEN, ENCODING_AES_KEY, CORP_ID)
 
-# --- 3. 消息防重放缓存 ---
-# 用于记录最近处理过的 MsgId，防止微信超时重试导致重复下载
+# 消息防重放缓存
 recent_msg_ids = []
 
 def send_wechat_reply(touser, content):
@@ -50,24 +53,47 @@ def send_wechat_reply(touser, content):
         print(f"[*] 微信回复失败: {e}")
 
 def search_magnet(keyword):
-    """搜索磁力链接"""
-    search_url = f"https://bitsearch.to/search?q={keyword}"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
+    """通过本地的 Prowlarr API 聚合搜索磁力链接"""
+    if not PROWLARR_API_KEY:
+        print("[*] 未配置 PROWLARR_API_KEY")
+        return None
+        
     try:
-        res = requests.get(search_url, headers=headers, timeout=15)
+        url = f"{PROWLARR_URL}/api/v1/search"
+        headers = {"X-Api-Key": PROWLARR_API_KEY}
+        params = {"query": keyword, "type": "search"}
+        
+        res = requests.get(url, headers=headers, params=params, timeout=20)
         res.raise_for_status()
-        magnets = re.findall(r'magnet:\?xt=urn:btih:[a-zA-Z0-9]{32,40}', res.text)
-        return magnets[0] if magnets else None
+        results = res.json()
+        
+        valid_results = []
+        for item in results:
+            magnet = item.get("magnetUrl") or item.get("downloadUrl")
+            if not magnet and str(item.get("guid")).startswith("magnet:"):
+                magnet = item.get("guid")
+                
+            if magnet and magnet.startswith("magnet:"):
+                valid_results.append({
+                    "magnet": magnet,
+                    "seeders": item.get("seeders", 0),
+                    "indexer": item.get("indexer", "未知站")
+                })
+        
+        if valid_results:
+            valid_results.sort(key=lambda x: x["seeders"], reverse=True)
+            best_choice = valid_results[0]
+            print(f"[*] 找到资源，来自: {best_choice['indexer']}，做种数: {best_choice['seeders']}")
+            return best_choice["magnet"]
+            
+        return None
     except Exception as e:
-        print(f"[*] 搜索磁力异常: {e}")
+        print(f"[*] Prowlarr 搜索异常: {e}")
         return None
 
 def cd2_offline_download(magnet_url):
     """使用 gRPC 调用 CloudDrive2 添加离线下载"""
-    if not CD2_TOKEN:
-        return False, "未配置 CD2_TOKEN"
+    if not CD2_TOKEN: return False, "未配置 CD2_TOKEN"
     try:
         channel = grpc.insecure_channel(CD2_HOST)
         stub = clouddrive_pb2_grpc.CloudDriveFileSrvStub(channel)
@@ -83,84 +109,3 @@ def cd2_offline_download(magnet_url):
         return False, f"gRPC错误: {e.code().name}"
     except Exception as e:
         return False, f"系统异常: {str(e)}"
-
-def process_message_async(from_user, content):
-    """后台异步处理线程：负责耗时的搜索和下载动作"""
-    target_magnet = None
-    is_search = False
-    
-    # 1. 判断是直链还是需要搜索
-    if content.startswith("magnet:?"):
-        target_magnet = content
-    elif len(content) > 3: 
-        send_wechat_reply(from_user, f"🔍 正在全网搜索【{content}】，请稍候...")
-        is_search = True
-        target_magnet = search_magnet(content)
-    
-    # 2. 执行下载与结果通知
-    if target_magnet:
-        success, detail = cd2_offline_download(target_magnet)
-        hash_code = target_magnet.split("urn:btih:")[1][:10].upper() + "..." if "urn:btih:" in target_magnet else "未知特征码"
-        
-        if success:
-            prefix = "✅ 搜索并离线成功" if is_search else "✅ 离线任务已建立"
-            reply_text = f"{prefix}\n🧲 {hash_code}\n🤖 状态: {detail}"
-        else:
-            reply_text = f"❌ 离线任务失败\n⚠️ 原因: {detail}"
-            
-        send_wechat_reply(from_user, reply_text)
-        
-    else:
-        if is_search:
-            send_wechat_reply(from_user, f"😭 抱歉，未能搜到关于【{content}】的磁力链接。")
-        else:
-            send_wechat_reply(from_user, "💡 请发送合法的磁力链接或番号关键词。")
-
-@app.route('/wechat', methods=['GET', 'POST'])
-def wechat_callback():
-    signature = request.args.get('msg_signature', '')
-    timestamp = request.args.get('timestamp', '')
-    nonce = request.args.get('nonce', '')
-
-    if request.method == 'GET':
-        echostr = request.args.get('echostr', '')
-        try:
-            return crypto.check_signature(signature, timestamp, nonce, echostr)
-        except Exception as e:
-            return f"验证失败: {e}", 403
-
-    if request.method == 'POST':
-        try:
-            msg_xml = crypto.decrypt_message(request.data, signature, timestamp, nonce)
-            tree = ET.fromstring(msg_xml)
-            
-            # --- 消息去重逻辑 ---
-            msg_id_node = tree.find('MsgId')
-            if msg_id_node is not None:
-                msg_id = msg_id_node.text
-                if msg_id in recent_msg_ids:
-                    # 如果是处理过的重复消息，直接忽略并返回 success
-                    return "success"
-                
-                # 记录新消息 ID，保持缓存列表最多存 100 条
-                recent_msg_ids.append(msg_id)
-                if len(recent_msg_ids) > 100:
-                    recent_msg_ids.pop(0)
-            
-            # --- 解析并启动后台线程 ---
-            msg_type = tree.find('MsgType').text
-            from_user = tree.find('FromUserName').text
-            
-            if msg_type == 'text':
-                content = tree.find('Content').text.strip()
-                # 开启新线程去处理业务，让 Flask 主线程秒回微信
-                threading.Thread(target=process_message_async, args=(from_user, content)).start()
-                
-            return "success"
-        except Exception as e:
-            print(f"[*] 处理异常: {e}")
-            return "success"
-
-if __name__ == '__main__':
-    print("[*] 机器人(带自动搜索防重复版)已启动，监听 5000 端口...")
-    app.run(host='0.0.0.0', port=5000)
