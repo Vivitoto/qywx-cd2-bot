@@ -1,22 +1,96 @@
-# 下载路由配置示例
-# default_route: 默认路由名；直接发送 magnet / ed2k / hash / torrent 链接时走这里。
+# ============================================================
+# 下载路由配置文件（download-routes.yml）示例
+# ============================================================
+# 这个文件只负责“下载存到哪里”。
+# 企业微信、CD2 地址、Token 这些敏感配置，还是放在 docker-compose.yml 里。
+#
+# 你在微信里发的命令，会按这里的 routes 来决定落到哪个目录。
+#
+# 最常见的命令格式：
+# 1) 直接发链接 / hash：
+#    magnet:?xt=urn:btih:XXXX
+#    ed2k://|file|demo.mkv|123|HASH|/
+#    E808151805F0A2C8C281FBEFA682AD29EDA73FF2
+#    -> 会走 default_route 指定的默认路由
+#
+# 2) 指定路由：
+#    /sub magnet:?xt=urn:btih:XXXX
+#    /temp ed2k://|file|demo.mkv|123|HASH|/
+#
+# 3) 指定路由 + 自定义子目录：
+#    /sub @你好 magnet:?xt=urn:btih:XXXX
+#    -> 如果该路由 allow_subdir=true，就会存到 path/@你好/... 
+#
+# 4) 一次提交多条：
+#    /sub @你好
+#    magnet:?xt=urn:btih:XXXX
+#    ed2k://|file|demo.mkv|123|HASH|/
+#
+# ------------------------------------------------------------
+# default_route
+# ------------------------------------------------------------
+# 直接发送 magnet / ed2k / hash / torrent 链接时，默认走哪个路由。
+# 必须写成下面 routes 里真实存在的名字。
 default_route: main
 
+# ------------------------------------------------------------
+# routes
+# ------------------------------------------------------------
+# 这里每一个键（比如 main / sub / temp）都会变成一个可用命令。
+# 例如有 sub，就可以在微信里发：
+#   /sub magnet:?xt=urn:btih:XXXX
+#
 routes:
+  # ----------------------------------------------------------
+  # main：默认离线路由
+  # ----------------------------------------------------------
+  # 用途：
+  # - 平时最常用的默认目录
+  # - 直接发 magnet / ed2k / hash 时，通常就走这里
+  #
+  # 示例命令：
+  # - magnet:?xt=urn:btih:XXXX
+  # - ed2k://|file|demo.mkv|123|HASH|/
+  # - E808151805F0A2C8C281FBEFA682AD29EDA73FF2
   main:
-    path: /115open/磁力
-    organize_by_date: true
-    allow_subdir: true
-    comment: 默认离线目录
+    path: /115open/磁力              # 基础目录。离线任务默认存到这里
+    organize_by_date: true         # true=自动追加日期目录，如 /2026-04-22
+    allow_subdir: true             # true=允许 /main @目录名 链接 这种写法
+    comment: 默认离线目录           # 备注说明，只给人看，程序不会用它做逻辑判断
 
+  # ----------------------------------------------------------
+  # sub：手动分类路由
+  # ----------------------------------------------------------
+  # 用途：
+  # - 适合你想手动分组、单独归类时使用
+  #
+  # 示例命令：
+  # - /sub magnet:?xt=urn:btih:XXXX
+  # - /sub @你好 magnet:?xt=urn:btih:XXXX
+  # - /sub @电影
+  #   ed2k://|file|a.mkv|111|HASH1|/
+  #   magnet:?xt=urn:btih:XXXX
   sub:
-    path: /115open/手动转存
-    organize_by_date: true
-    allow_subdir: true
-    comment: 手动转存目录
+    path: /115open/手动转存         # /sub 路由的基础目录
+    organize_by_date: true         # true=最终可能变成 /115open/手动转存/@你好/2026-04-22
+    allow_subdir: true             # true=允许你写 @你好 这种自定义子目录
+    comment: 手动转存目录           # 备注：适合手动分类、临时归档、单独整理
 
+  # ----------------------------------------------------------
+  # temp：临时目录路由
+  # ----------------------------------------------------------
+  # 用途：
+  # - 适合不想自动建日期目录的临时转存
+  # - 也适合不希望用户乱建子目录时使用
+  #
+  # 示例命令：
+  # - /temp magnet:?xt=urn:btih:XXXX
+  # - /temp ed2k://|file|demo.mkv|123|HASH|/
+  #
+  # 注意：
+  # - allow_subdir=false 时，/temp @你好 xxx 这种命令不会被当成子目录用法
   temp:
-    path: /115open/临时
-    organize_by_date: false
-    allow_subdir: false
+    path: /115open/临时             # 临时转存目录
+    organize_by_date: false        # false=不追加日期目录，直接落到 /115open/临时
+    allow_subdir: false            # false=不允许 /temp @目录名 链接
     comment: 临时目录，不允许自定义子目录

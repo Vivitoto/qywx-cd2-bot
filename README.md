@@ -1,6 +1,6 @@
 # 🤖 企业微信 CD2 离线下载机器人 (vito-cd2-bot)
 
-基于 Python + Flask + gRPC 构建的企业微信机器人。将你的企业微信打造成一个**直链 / 磁链 / ED2K 离线下载中枢**，把消息直接推送到本地的 CloudDrive2 进行离线下载。
+基于 Python + Flask + gRPC 构建、使用 Gunicorn 运行的企业微信机器人。将你的企业微信打造成一个**直链 / 磁链 / ED2K 离线下载中枢**，把消息直接推送到本地的 CloudDrive2 进行离线下载。
 
 > 本项目 fork 自 [jiumian8/jiumian-cd2-bot](https://github.com/jiumian8/jiumian-cd2-bot)，在此基础上重构为**YAML 路由化下载目录**，并新增了**按路由独立日期归档**、**自定义离线子目录**、**ED2K 支持**、**多链接批量提交**等功能。
 
@@ -71,12 +71,14 @@ services:
 > - 容器首次启动时，若 `/config/download-routes.yml` 不存在，会自动从镜像里的示例文件初始化一份。
 > - 初始化后可直接编辑宿主机上的 `./config/download-routes.yml`。
 > - 修改路由配置后，重启容器即可生效。
+> - 容器现在使用 **Gunicorn** 启动，不再出现 Flask development server 的那条警告。
 
 #### 1.1 `download-routes.yml` 示例
 
+> 容器首次启动时会自动生成这个文件。你可以直接改宿主机上的 `./config/download-routes.yml`。
+> 文件里已经带详细中文注释；下面是精简版结构说明：
+
 ```yaml
-# 下载路由配置示例
-# default_route: 默认路由名；直接发送 magnet / ed2k / hash / torrent 链接时走这里。
 default_route: main
 
 routes:
@@ -98,6 +100,13 @@ routes:
     allow_subdir: false
     comment: 临时目录，不允许自定义子目录
 ```
+
+字段说明：
+- `default_route`：默认路由。直接发 magnet / ed2k / hash 时走它。
+- `routes.<路由名>.path`：这个路由对应的基础目录。
+- `routes.<路由名>.organize_by_date`：是否自动在最后追加日期目录。
+- `routes.<路由名>.allow_subdir`：是否允许 `/路由名 @子目录 链接` 这种写法。
+- `routes.<路由名>.comment`：备注说明，只给人看。
 
 > 💡 **路径示例**
 > - 默认磁链 → `/115open/磁力/2026-04-22`

@@ -5,3 +5,4 @@ requests
 grpcio
 grpcio-tools
 PyYAML
+gunicorn
