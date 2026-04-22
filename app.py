@@ -16,6 +16,14 @@ import clouddrive_pb2_grpc
 
 app = Flask(__name__)
 
+
+def log_info(message: str):
+    print(f"[*] {message}", flush=True)
+
+
+def log_warn(message: str):
+    print(f"[!] {message}", flush=True)
+
 # --- 1. 企微配置 ---
 CORP_ID = os.getenv("CORP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
@@ -47,13 +55,13 @@ def _ensure_routes_config():
         os.makedirs(config_dir, exist_ok=True)
 
     if os.path.exists(config_path):
-        print(f"[*] 已检测到下载路由配置文件: {config_path}")
+        log_info(f"已检测到下载路由配置文件: {config_path}")
         return False
 
     if os.path.exists(DOWNLOAD_ROUTES_EXAMPLE):
         shutil.copyfile(DOWNLOAD_ROUTES_EXAMPLE, config_path)
-        print(f"[*] 未发现下载路由配置，已初始化到: {config_path}")
-        print("[*] 请按需修改该文件后重启容器。")
+        log_info(f"未发现下载路由配置，已初始化到: {config_path}")
+        log_info("请按需修改该文件后重启容器。")
         return True
 
     raise FileNotFoundError(f"下载路由示例文件不存在: {DOWNLOAD_ROUTES_EXAMPLE}")
@@ -87,7 +95,7 @@ def _load_download_routes():
         }
 
     if not normalized_routes:
-        print("[!] 下载路由配置读取失败：routes 为空")
+        log_warn("下载路由配置读取失败：routes 为空")
         raise ValueError("下载路由配置为空，请至少配置一个 routes 项。")
 
     if default_route not in normalized_routes:
@@ -96,17 +104,17 @@ def _load_download_routes():
     DOWNLOAD_ROUTES = normalized_routes
     DEFAULT_DOWNLOAD_ROUTE = default_route
 
-    print(f"[*] 下载路由配置读取成功，默认路由: {DEFAULT_DOWNLOAD_ROUTE}")
-    print(f"[*] 可用路由: {', '.join(DOWNLOAD_ROUTES.keys())}")
+    log_info(f"下载路由配置读取成功，默认路由: {DEFAULT_DOWNLOAD_ROUTE}")
+    log_info(f"可用路由: {', '.join(DOWNLOAD_ROUTES.keys())}")
     if initialized:
-        print("[*] 当前运行使用的是自动初始化后的路由配置。")
+        log_info("当前运行使用的是自动初始化后的路由配置。")
 
 
 # Gunicorn 以 `app:app` 导入模块时不会执行 __main__，
 # 所以需要在模块导入阶段完成配置初始化。
 _load_download_routes()
 crypto = WeChatCrypto(APP_TOKEN, ENCODING_AES_KEY, CORP_ID)
-print("[*] 企业微信加解密模块初始化成功")
+log_info("企业微信加解密模块初始化成功")
 
 
 
@@ -137,7 +145,7 @@ def send_wechat_reply(touser, content):
         }
         requests.post(send_url, json=payload, timeout=10)
     except Exception as e:
-        print(f"[*] 微信回复失败: {e}")
+        log_warn(f"微信回复失败: {e}")
 
 
 
@@ -175,7 +183,7 @@ def _get_available_routes_text() -> str:
 
 def _cd2_create_folder(folder_path):
     if not CD2_TOKEN:
-        print("[!] CD2 创建目录失败：未配置 CD2_TOKEN")
+        log_warn("CD2 创建目录失败：未配置 CD2_TOKEN")
         return False
     try:
         channel = grpc.insecure_channel(CD2_HOST)
@@ -183,31 +191,48 @@ def _cd2_create_folder(folder_path):
         metadata = [("authorization", f"Bearer {CD2_TOKEN}")]
         req = clouddrive_pb2.CreateFolderRequest(path=folder_path)
         stub.CreateFolder(req, metadata=metadata, timeout=10)
-        print(f"[*] CD2 目录创建成功: {folder_path}")
+        log_info(f"CD2 目录创建成功: {folder_path}")
         return True
     except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.ALREADY_EXISTS:
-            print(f"[*] CD2 目录已存在: {folder_path}")
+            log_info(f"CD2 目录已存在: {folder_path}")
             return True
-        print(f"[*] CD2 创建目录异常: {e}")
+        log_warn(f"CD2 创建目录异常: {e}")
         return False
     except Exception as e:
-        print(f"[*] CD2 创建目录异常: {e}")
+        log_warn(f"CD2 创建目录异常: {e}")
         return False
+
+
+def _cd2_ensure_folder_recursive(folder_path: str) -> bool:
+    """按层级逐级创建目录，避免 CD2 CreateFolder 不支持递归建目录。"""
+    folder_path = str(folder_path or "").strip()
+    if not folder_path or folder_path == "/":
+        return True
+
+    parts = [p for p in folder_path.split("/") if p]
+    current = ""
+    for part in parts:
+        current = f"{current}/{part}"
+        ok = _cd2_create_folder(current)
+        if not ok:
+            log_warn(f"CD2 递归建目录失败，停止在: {current}")
+            return False
+    return True
 
 
 
 def cd2_offline_download(target_url, target_folder):
     if not CD2_TOKEN:
-        print("[!] 转存失败：未配置 CD2_TOKEN")
+        log_warn("转存失败：未配置 CD2_TOKEN")
         return False, "未配置 CD2_TOKEN"
     try:
         target_folder = (target_folder or "/").strip() or "/"
-        print(f"[*] 开始提交离线任务，目标目录: {target_folder}")
-        print(f"[*] 离线源: {target_url[:200]}")
-        created = _cd2_create_folder(target_folder)
+        log_info(f"开始提交离线任务，目标目录: {target_folder}")
+        log_info(f"离线源: {target_url[:200]}")
+        created = _cd2_ensure_folder_recursive(target_folder)
         if not created:
-            print(f"[*] 警告：创建目录 {target_folder} 失败，将尝试直接转存到该路径")
+            log_warn(f"创建目录 {target_folder} 失败，将尝试直接转存到该路径")
 
         channel = grpc.insecure_channel(CD2_HOST)
         stub = clouddrive_pb2_grpc.CloudDriveFileSrvStub(channel)
@@ -215,12 +240,12 @@ def cd2_offline_download(target_url, target_folder):
         req = clouddrive_pb2.AddOfflineFileRequest(urls=target_url, toFolder=target_folder, checkFolderAfterSecs=0)
         res = stub.AddOfflineFiles(req, metadata=metadata, timeout=10)
         if res.success:
-            print(f"[*] 转存提交成功: {target_folder}")
+            log_info(f"转存提交成功: {target_folder}")
             return True, f"提交成功 → {target_folder}"
-        print(f"[!] 转存提交失败: {res.errorMessage}")
+        log_warn(f"转存提交失败: {res.errorMessage}")
         return False, f"被拒: {res.errorMessage}"
     except Exception as e:
-        print(f"[!] 转存系统异常: {e}")
+        log_warn(f"转存系统异常: {e}")
         return False, f"系统异常: {str(e)}"
 
 
@@ -359,7 +384,7 @@ def process_message_async(from_user, content):
             return
 
         target_folder = _resolve_target_folder(parsed["route"], parsed["custom_subdir"])
-        print(f"[*] 路由解析成功: route={parsed['route']}, subdir={parsed['custom_subdir'] or '-'}, target_folder={target_folder}")
+        log_info(f"路由解析成功: route={parsed['route']}, subdir={parsed['custom_subdir'] or '-'}, target_folder={target_folder}")
         success_count = 0
         fail_count = 0
         fail_reasons = []
@@ -443,8 +468,8 @@ def wechat_callback():
             return "success"
 
 
-print("[*] 转存功能模块初始化成功")
+log_info("转存功能模块初始化成功")
 
 if __name__ == "__main__":
-    print("[*] 机器人已启动，监听 5000 端口...")
+    log_info("机器人已启动，监听 5000 端口...")
     app.run(host="0.0.0.0", port=5000)
