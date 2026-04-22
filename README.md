@@ -73,46 +73,11 @@ services:
 > - 修改路由配置后，重启容器即可生效。
 > - 容器现在使用 **Gunicorn** 启动，不再出现 Flask development server 的那条警告。
 
-#### 1.1 `download-routes.yml` 示例
+#### 1.1 `download-routes.yml`
 
-> 容器首次启动时会自动生成这个文件。你可以直接改宿主机上的 `./config/download-routes.yml`。
-> 文件里已经带详细中文注释；下面是精简版结构说明：
-
-```yaml
-default_route: main
-
-routes:
-  main:
-    path: /115open/磁力
-    organize_by_date: true
-    allow_subdir: true
-    comment: 默认离线目录
-
-  sub:
-    path: /115open/手动转存
-    organize_by_date: true
-    allow_subdir: true
-    comment: 手动转存目录
-
-  temp:
-    path: /115open/临时
-    organize_by_date: false
-    allow_subdir: false
-    comment: 临时目录，不允许自定义子目录
-```
-
-字段说明：
-- `default_route`：默认路由。直接发 magnet / ed2k / hash 时走它。
-- `routes.<路由名>.path`：这个路由对应的基础目录。
-- `routes.<路由名>.organize_by_date`：是否自动在最后追加日期目录。
-- `routes.<路由名>.allow_subdir`：是否允许 `/路由名 @子目录 链接` 这种写法。
-- `routes.<路由名>.comment`：备注说明，只给人看。
-
-> 💡 **路径示例**
-> - 默认磁链 → `/115open/磁力/2026-04-22`
-> - `/sub E808...` → `/115open/手动转存/2026-04-22`
-> - `/sub @你好 E808...` → `/115open/手动转存/@你好/2026-04-22`
-> - `/temp E808...` → `/115open/临时`
+> 转存路径路由配置统一在 `./config/download-routes.yml` 里修改。
+> 容器首次启动时会自动生成这个文件。
+> 命令使用方式写在本文后面的“使用说明”里，YAML 文件里只保留必要字段和简要备注。  
 
 #### 2. 配置企业微信回调
 

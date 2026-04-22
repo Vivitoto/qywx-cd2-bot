@@ -47,6 +47,7 @@ def _ensure_routes_config():
         os.makedirs(config_dir, exist_ok=True)
 
     if os.path.exists(config_path):
+        print(f"[*] 已检测到下载路由配置文件: {config_path}")
         return False
 
     if os.path.exists(DOWNLOAD_ROUTES_EXAMPLE):
@@ -86,6 +87,7 @@ def _load_download_routes():
         }
 
     if not normalized_routes:
+        print("[!] 下载路由配置读取失败：routes 为空")
         raise ValueError("下载路由配置为空，请至少配置一个 routes 项。")
 
     if default_route not in normalized_routes:
@@ -94,15 +96,17 @@ def _load_download_routes():
     DOWNLOAD_ROUTES = normalized_routes
     DEFAULT_DOWNLOAD_ROUTE = default_route
 
+    print(f"[*] 下载路由配置读取成功，默认路由: {DEFAULT_DOWNLOAD_ROUTE}")
+    print(f"[*] 可用路由: {', '.join(DOWNLOAD_ROUTES.keys())}")
     if initialized:
-        print(f"[*] 当前默认路由: {DEFAULT_DOWNLOAD_ROUTE}")
-        print(f"[*] 可用路由: {', '.join(DOWNLOAD_ROUTES.keys())}")
+        print("[*] 当前运行使用的是自动初始化后的路由配置。")
 
 
 # Gunicorn 以 `app:app` 导入模块时不会执行 __main__，
 # 所以需要在模块导入阶段完成配置初始化。
 _load_download_routes()
 crypto = WeChatCrypto(APP_TOKEN, ENCODING_AES_KEY, CORP_ID)
+print("[*] 企业微信加解密模块初始化成功")
 
 
 
@@ -171,6 +175,7 @@ def _get_available_routes_text() -> str:
 
 def _cd2_create_folder(folder_path):
     if not CD2_TOKEN:
+        print("[!] CD2 创建目录失败：未配置 CD2_TOKEN")
         return False
     try:
         channel = grpc.insecure_channel(CD2_HOST)
@@ -178,9 +183,11 @@ def _cd2_create_folder(folder_path):
         metadata = [("authorization", f"Bearer {CD2_TOKEN}")]
         req = clouddrive_pb2.CreateFolderRequest(path=folder_path)
         stub.CreateFolder(req, metadata=metadata, timeout=10)
+        print(f"[*] CD2 目录创建成功: {folder_path}")
         return True
     except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.ALREADY_EXISTS:
+            print(f"[*] CD2 目录已存在: {folder_path}")
             return True
         print(f"[*] CD2 创建目录异常: {e}")
         return False
@@ -192,9 +199,12 @@ def _cd2_create_folder(folder_path):
 
 def cd2_offline_download(target_url, target_folder):
     if not CD2_TOKEN:
+        print("[!] 转存失败：未配置 CD2_TOKEN")
         return False, "未配置 CD2_TOKEN"
     try:
         target_folder = (target_folder or "/").strip() or "/"
+        print(f"[*] 开始提交离线任务，目标目录: {target_folder}")
+        print(f"[*] 离线源: {target_url[:200]}")
         created = _cd2_create_folder(target_folder)
         if not created:
             print(f"[*] 警告：创建目录 {target_folder} 失败，将尝试直接转存到该路径")
@@ -204,8 +214,13 @@ def cd2_offline_download(target_url, target_folder):
         metadata = [("authorization", f"Bearer {CD2_TOKEN}")]
         req = clouddrive_pb2.AddOfflineFileRequest(urls=target_url, toFolder=target_folder, checkFolderAfterSecs=0)
         res = stub.AddOfflineFiles(req, metadata=metadata, timeout=10)
-        return (True, f"提交成功 → {target_folder}") if res.success else (False, f"被拒: {res.errorMessage}")
+        if res.success:
+            print(f"[*] 转存提交成功: {target_folder}")
+            return True, f"提交成功 → {target_folder}"
+        print(f"[!] 转存提交失败: {res.errorMessage}")
+        return False, f"被拒: {res.errorMessage}"
     except Exception as e:
+        print(f"[!] 转存系统异常: {e}")
         return False, f"系统异常: {str(e)}"
 
 
@@ -344,6 +359,7 @@ def process_message_async(from_user, content):
             return
 
         target_folder = _resolve_target_folder(parsed["route"], parsed["custom_subdir"])
+        print(f"[*] 路由解析成功: route={parsed['route']}, subdir={parsed['custom_subdir'] or '-'}, target_folder={target_folder}")
         success_count = 0
         fail_count = 0
         fail_reasons = []
@@ -426,6 +442,8 @@ def wechat_callback():
         except Exception:
             return "success"
 
+
+print("[*] 转存功能模块初始化成功")
 
 if __name__ == "__main__":
     print("[*] 机器人已启动，监听 5000 端口...")
