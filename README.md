@@ -1,6 +1,8 @@
-# 🤖 企业微信 CD2 离线下载机器人 (WeChat CD2 Bot)
+# 🤖 企业微信 CD2 离线下载机器人 (vito-cd2-bot)
 
 基于 Python + Flask + gRPC 构建的企业微信机器人。将你的企业微信打造成一个**全自动找资源 + 离线下载的超级中枢**！发送车牌号，一键检索并推送到本地的 CloudDrive2 进行离线下载。
+
+> 本项目 fork 自 [jiumian8/jiumian-cd2-bot](https://github.com/jiumian8/jiumian-cd2-bot)，在此基础上新增了**按日期自动归档**功能。
 
 ## ✨ 核心功能 (Features)
 
@@ -9,6 +11,7 @@
 * 🔢 **交互式选择：** 搜索完毕后返回带文件大小和做种人数的资源列表，**只需回复序号（如 `1`、`2`）即可精准下载**。
 * ⚡ **底层通信：** 彻底抛弃低效的网页模拟，采用官方标准的 **gRPC 协议 + JWT Token** 与 CloudDrive2 通信，极速且稳定。
 * 🛡️ **防重防抖：** 内置异步线程与消息去重机制，完美绕过企业微信服务器“5秒内无响应自动重试三次”的变态机制。
+* 📅 **日期归档（新增）：** 转存时自动在目标路径下创建 `YYYY-MM-DD` 日期目录，每日资源自动隔离，方便查找整理。
 
 ---
 
@@ -26,15 +29,17 @@
 ## 🚀 部署指南 (Deployment)
 
 推荐使用 Docker Compose 进行部署。
-🛠️ 第一部分：Prowlarr 部署与配置 (聚合搜索中心)
+
+### 🛠️ 第一部分：Prowlarr 部署与配置 (聚合搜索中心)
+
 Prowlarr 是本系统的“眼睛”，负责从全球各大索引站抓取资源。
 
-1. Docker 部署
+#### 1. Docker 部署
+
 在你的 PVE 或 NAS 上创建 prowlarr 目录，新建 docker-compose.yml：
 
-YAML
-
-```version: '3'
+```yaml
+version: '3'
 services:
   prowlarr:
     image: ghcr.io/linuxserver/prowlarr:latest
@@ -47,24 +52,26 @@ services:
       - 9696:9696
     restart: unless-stopped
 ```
-运行 docker compose up -d 启动。
 
-2. 初始化教程
-访问后台： 浏览器打开 http://你的IP:9696
+运行 `docker compose up -d` 启动。
 
-添加索引器 (Indexer)：
+#### 2. 初始化教程
 
-点击左侧 Indexers -> Add Indexer。
+访问后台：浏览器打开 http://你的IP:9696
 
-搜索并添加 Sukebei (找车牌神器) 和 Solid Torrents (通用搜索)。
+**添加索引器 (Indexer)：**
+- 点击左侧 Indexers -> Add Indexer。
+- 搜索并添加 Sukebei (找车牌神器) 和 Solid Torrents (通用搜索)。
+- 点击 Save 保存。
 
-点击 Save 保存。
+**获取 API Key：**
+- 前往 Settings -> General -> 复制 API Key（稍后填入机器人配置）。
 
-获取 API Key：
+---
 
-前往 Settings -> General -> 复制 API Key（稍后填入机器人配置）。
+### 🛠️ 第二部分：vito-cd2-bot 部署
 
-### 1. 创建 `docker-compose.yml`
+#### 1. 创建 `docker-compose.yml`
 
 新建一个目录，创建并编辑 `docker-compose.yml` 文件：
 
@@ -72,56 +79,72 @@ services:
 version: '3.8'
 
 services:
-  qywx-cd2-bot:
-    image: ghcr.io/jiumian8/qywx-cd2-bot:latest
-    container_name: qywx-cd2-bot
+  vito-cd2-bot:
+    image: ghcr.io/vivitoto/vito-cd2-bot:latest
+    container_name: vito-cd2-bot
     restart: unless-stopped
     ports:
       - "5110:5000"  # 左侧可以改为你想要暴露的外部端口
-    environment:   
+    environment:
       # --- 企业微信凭证 ---
       - CORP_ID=企业ID
       - APP_SECRET=你的自建应用Secret
       - AGENT_ID=应用id
       - APP_TOKEN=你的接收消息Token
       - ENCODING_AES_KEY=你的43位消息加解密Key
-      
+
       # --- 企业微信 API 代理 ---
       - WECHAT_PROXY=http://你的反向代理IP:端口
-      
+
       # --- CloudDrive2 配置 ---
-      - CD2_HOST=192.168.x.x:19798       # CD2的内网IP和端口，不要带 http://
-      - CD2_TOKEN=你的CD2_API令牌         # token权限至少要给离线下载 我是网盘那个都给了 具体可以看看cd2文档
-      - DOWNLOAD_PATH=/115/离线下载目录   # CD2中真实存在的挂载路径
-      
+      - CD2_HOST=192.168.x.x:19798       # CD2 的内网 IP 和端口，不要带 http://
+      - CD2_TOKEN=你的CD2_API令牌         # token 权限至少要给离线下载（建议网盘权限全开）
+      - DOWNLOAD_PATH=/115/离线下载目录   # CD2 中真实存在的挂载路径
+      - ORGANIZE_BY_DATE=true             # true = 自动在 DOWNLOAD_PATH 下创建 YYYY-MM-DD 日期目录（默认开启）
+
       # --- Prowlarr 聚合搜索配置 ---
-      - PROWLARR_URL=http://192.168.x.x:9696  # Prowlarr的内网地址，必须带 http://
+      - PROWLARR_URL=http://192.168.x.x:9696  # Prowlarr 的内网地址，必须带 http://
       - PROWLARR_API_KEY=你的Prowlarr_API_Key
 ```
-### 2. 配置企业微信回调
+
+> 💡 **日期归档示例**
+> - `DOWNLOAD_PATH=/115open/磁力`
+> - 今天是 `2026-04-22`
+> - 实际转存路径 → `/115open/磁力/2026-04-22`
+> - 明天 → `/115open/磁力/2026-04-23`
+
+#### 2. 配置企业微信回调
 
 前往企业微信后台 -> 应用管理 -> 你的应用 -> 接收消息 -> 设置 API 接收。
-* **URL:** 填写 `http://你的公网穿透域名或IP:5000/wechat`  **(注意结尾必须带 `/wechat`)**
-* **Token / EncodingAESKey:** 与 docker-compose 中的配置保持一致。
+
+- **URL:** 填写 `http://你的公网穿透域名或IP:5000/wechat` **(注意结尾必须带 `/wechat`)**
+- **Token / EncodingAESKey:** 与 docker-compose 中的配置保持一致。
+
 点击保存，提示成功即可！
 
+---
 
 ## 💡 使用说明 (Usage)
 
 直接在微信中找到你的自建应用机器人，发送消息即可交互：
 
-* **场景 1：直接下载**
-    发送：`magnet:?xt=urn:btih:XXXXXX`
-    回复：✅ 直链离线成功
+### 场景 1：直接下载
 
-* **场景 2：搜索资源**
-    发送：`SDMM-229` 或 `漫威`
-    回复：
-    > 🔍 找到 8 个结果，请直接回复【序号】下载：
-    > 1. [4.60 GB] SDMM-229 高清版 (源:sukebei 种:123)
-    > 2. [2.10 GB] SDMM-229 压缩版 (源:btdigg 种:45)
+发送：`magnet:?xt=urn:btih:XXXXXX`
 
-* **场景 3：选择下载**
-    发送：`1`
-    回复：✅ 离线任务建立成功！
+回复：✅ 直链离线成功 → `/115open/磁力/2026-04-22`
 
+### 场景 2：搜索资源
+
+发送：`SDMM-229` 或 `漫威`
+
+回复：
+> 🔍 找到 8 个结果，请直接回复【序号】下载：
+> 1. [4.60 GB] SDMM-229 高清版 (源:sukebei 种:123)
+> 2. [2.10 GB] SDMM-229 压缩版 (源:btdigg 种:45)
+
+### 场景 3：选择下载
+
+发送：`1`
+
+回复：✅ 离线任务建立成功！→ `/115open/磁力/2026-04-22`
