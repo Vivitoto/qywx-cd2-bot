@@ -4,6 +4,7 @@ import shutil
 import threading
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from typing import Optional
 
 import grpc
 import requests
@@ -158,7 +159,7 @@ def _get_junk_extensions() -> set:
     return set(e.strip().lower() for e in JUNK_EXTENSIONS.split(",") if e.strip())
 
 
-def _get_size_threshold_mb() -> float | None:
+def _get_size_threshold_mb() -> Optional[float]:
     val = str(JUNK_SIZE_THRESHOLD_MB or "").strip()
     return float(val) if val else None
 
