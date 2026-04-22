@@ -44,6 +44,12 @@ DOWNLOAD_ROUTES_EXAMPLE = os.getenv("DOWNLOAD_ROUTES_EXAMPLE", "/app/download-ro
 ENABLE_CLEANUP = os.getenv("ENABLE_CLEANUP", "false").lower() in ("true", "1", "yes", "on")
 JUNK_EXTENSIONS = os.getenv("JUNK_EXTENSIONS", "txt,url,html,mhtml,htm,mht,mp4,exe,rar,apk,gif,png,jpg")
 JUNK_SIZE_THRESHOLD_MB = os.getenv("JUNK_SIZE_THRESHOLD_MB")
+
+# --- 5. 中转清洗全局状态 ---
+STAGING_FOLDER = ""
+staging_tasks = {}
+staging_lock = threading.Lock()
+
 user_search_cache = {}
 DOWNLOAD_ROUTES = {}
 DEFAULT_DOWNLOAD_ROUTE = "main"
@@ -81,6 +87,14 @@ def _load_download_routes():
 
     routes = config.get("routes") or {}
     default_route = str(config.get("default_route") or "main").strip()
+
+    # 读取全局中转目录
+    global STAGING_FOLDER
+    STAGING_FOLDER = str(config.get("staging_folder") or "").strip()
+    if STAGING_FOLDER:
+        log_info(f"中转清洗已启用，中转目录: {STAGING_FOLDER}")
+    else:
+        log_info("中转清洗未启用（YAML 未配置 staging_folder）")
 
     normalized_routes = {}
     for route_name, route_conf in routes.items():
@@ -120,6 +134,18 @@ log_info("企业微信加解密模块初始化成功")
 
 
 
+def _parse_magnet_info(url: str):
+    """从 magnet URI 解析 dn(文件名) 和 xl(大小bytes)。"""
+    dn_match = re.search(r'[?&]dn=([^&]+)', url, re.IGNORECASE)
+    xl_match = re.search(r'[?&]xl=(\d+)', url, re.IGNORECASE)
+    if not dn_match:
+        return None, None
+    from urllib.parse import unquote
+    filename = unquote(dn_match.group(1))
+    size_bytes = int(xl_match.group(1)) if xl_match else None
+    return filename, size_bytes
+
+
 def _parse_ed2k_info(url: str):
     """从 ed2k 链接解析文件名和大小(bytes)。返回 (filename, size_bytes) 或 (None, None)。"""
     match = re.match(r'ed2k://\|file\|([^|]+)\|(\d+)\|[a-fA-F0-9]{32}\|/', url, re.IGNORECASE)
@@ -142,14 +168,20 @@ def _should_cleanup(url: str) -> tuple[bool, str]:
     if not ENABLE_CLEANUP:
         return False, ""
 
+    ext_blacklist = _get_junk_extensions()
     threshold = _get_size_threshold_mb()
-    if not threshold:
-        return False, ""
 
-    if not url.lower().startswith("ed2k://"):
-        return False, ""
+    filename = None
+    size_bytes = None
 
-    filename, size_bytes = _parse_ed2k_info(url)
+    # --- ed2k ---
+    if url.lower().startswith("ed2k://"):
+        filename, size_bytes = _parse_ed2k_info(url)
+
+    # --- magnet ---
+    elif url.lower().startswith("magnet:?"):
+        filename, size_bytes = _parse_magnet_info(url)
+
     if filename is None:
         return False, ""
 
@@ -157,14 +189,23 @@ def _should_cleanup(url: str) -> tuple[bool, str]:
     if "." in filename:
         ext = filename.rsplit(".", 1)[-1].lower()
 
-    if ext not in _get_junk_extensions():
+    if ext not in ext_blacklist:
         return False, ""
 
-    size_mb = size_bytes / (1024 * 1024)
-    if size_mb >= threshold:
+    # 后缀命中黑名单后，再看体积
+    if threshold is not None and size_bytes is not None:
+        size_mb = size_bytes / (1024 * 1024)
+        if size_mb >= threshold:
+            return False, ""
+        reason = f"{filename} ({ext}, {size_mb:.1f}MB < {threshold}MB)"
+        return True, reason
+
+    # 配置了阈值但无法获取体积（保守策略：不清洗）
+    if threshold is not None and size_bytes is None:
         return False, ""
 
-    reason = f"{filename} ({ext}, {size_mb:.1f}MB < {threshold}MB)"
+    # 没有配置体积阈值：直接按后缀清洗
+    reason = f"{filename} ({ext})"
     return True, reason
 
 
@@ -306,6 +347,224 @@ def cd2_offline_download(target_url, target_folder):
 
 
 
+# --- 中转清洗相关函数 ---
+
+def _cd2_list_offline_files(path: str):
+    """查询某路径下的离线任务列表。"""
+    if not CD2_TOKEN:
+        return []
+    try:
+        channel = grpc.insecure_channel(CD2_HOST)
+        stub = clouddrive_pb2_grpc.CloudDriveFileSrvStub(channel)
+        metadata = [("authorization", f"Bearer {CD2_TOKEN}")]
+        req = clouddrive_pb2.FileRequest(path=path)
+        res = stub.ListOfflineFilesByPath(req, metadata=metadata, timeout=10)
+        return list(res.offlineFiles)
+    except Exception as e:
+        log_warn(f"查询离线任务失败 {path}: {e}")
+        return []
+
+
+def _cd2_list_directory_files(path: str):
+    """用 GetSubFiles 列出目录下的文件和子目录。"""
+    if not CD2_TOKEN:
+        return []
+    try:
+        channel = grpc.insecure_channel(CD2_HOST)
+        stub = clouddrive_pb2_grpc.CloudDriveFileSrvStub(channel)
+        metadata = [("authorization", f"Bearer {CD2_TOKEN}")]
+        req = clouddrive_pb2.ListSubFileRequest(path=path, forceRefresh=True)
+        files = []
+        for reply in stub.GetSubFiles(req, metadata=metadata, timeout=10):
+            for f in reply.subFiles:
+                files.append(f)
+        return files
+    except Exception as e:
+        log_warn(f"列出目录失败 {path}: {e}")
+        return []
+
+
+def _cd2_move_file(src_path: str, dest_folder: str):
+    """移动文件到目标目录。"""
+    if not CD2_TOKEN:
+        return False
+    try:
+        channel = grpc.insecure_channel(CD2_HOST)
+        stub = clouddrive_pb2_grpc.CloudDriveFileSrvStub(channel)
+        metadata = [("authorization", f"Bearer {CD2_TOKEN}")]
+        req = clouddrive_pb2.MoveFileRequest(
+            theFilePaths=[src_path],
+            destPath=dest_folder,
+            conflictPolicy=clouddrive_pb2.MoveFileRequest.Overwrite
+        )
+        res = stub.MoveFile(req, metadata=metadata, timeout=10)
+        if res.success:
+            log_info(f"文件移动成功: {src_path} -> {dest_folder}")
+            return True
+        log_warn(f"文件移动失败: {src_path} -> {dest_folder}: {res.errorMessage}")
+        return False
+    except Exception as e:
+        log_warn(f"文件移动异常: {src_path} -> {dest_folder}: {e}")
+        return False
+
+
+def _cd2_delete_file(path: str):
+    """删除单个文件。"""
+    if not CD2_TOKEN:
+        return False
+    try:
+        channel = grpc.insecure_channel(CD2_HOST)
+        stub = clouddrive_pb2_grpc.CloudDriveFileSrvStub(channel)
+        metadata = [("authorization", f"Bearer {CD2_TOKEN}")]
+        req = clouddrive_pb2.FileRequest(path=path)
+        res = stub.DeleteFile(req, metadata=metadata, timeout=10)
+        if res.success:
+            log_info(f"文件删除成功: {path}")
+            return True
+        log_warn(f"文件删除失败: {path}: {res.errorMessage}")
+        return False
+    except Exception as e:
+        log_warn(f"文件删除异常: {path}: {e}")
+        return False
+
+
+def _process_staging_task(task: dict):
+    """处理单个中转任务：下载完成后清洗并转存。"""
+    import time
+    staging_path = task["staging_path"]
+    target_folder = task["target_folder"]
+    user_id = task["user_id"]
+
+    log_info(f"开始处理中转任务: {staging_path}")
+
+    # 1. 列出中转目录的实际文件
+    files = _cd2_list_directory_files(staging_path)
+    if not files:
+        log_info(f"中转目录为空: {staging_path}")
+        send_wechat_reply(user_id, f"📦 中转任务完成\n目标目录: {target_folder}\n⚠️ 目录为空，无文件可处理。")
+        return
+
+    keep_files = []
+    junk_files = []
+
+    ext_blacklist = _get_junk_extensions()
+    threshold = _get_size_threshold_mb()
+
+    for f in files:
+        # 跳过子目录
+        if f.fileType == clouddrive_pb2.CloudDriveFile.Directory:
+            continue
+
+        ext = ""
+        if "." in f.name:
+            ext = f.name.rsplit(".", 1)[-1].lower()
+
+        size_mb = f.size / (1024 * 1024) if f.size else 0
+        is_junk = False
+        reason = ""
+
+        if ext in ext_blacklist:
+            if threshold is not None:
+                if size_mb < threshold:
+                    is_junk = True
+                    reason = f"{f.name} ({ext}, {size_mb:.1f}MB < {threshold}MB)"
+            else:
+                is_junk = True
+                reason = f"{f.name} ({ext})"
+
+        if is_junk:
+            junk_files.append((f.fullPathName, reason))
+        else:
+            keep_files.append(f.fullPathName)
+
+    # 2. 逐个移动保留文件（每 5 秒一个）
+    moved_count = 0
+    for src_path in keep_files:
+        if _cd2_move_file(src_path, target_folder):
+            moved_count += 1
+        time.sleep(5)
+
+    # 3. 逐个删除垃圾文件（每 5 秒一个）
+    deleted_count = 0
+    for src_path, reason in junk_files:
+        if _cd2_delete_file(src_path):
+            deleted_count += 1
+        time.sleep(5)
+
+    # 4. 通知用户（只做一次，在处理完所有文件之后）
+    log_info(f"中转清洗统计: 总文件 {len(files)} 个, 保留 {len(keep_files)} 个, 垃圾文件 {len(junk_files)} 个, 成功移动 {moved_count} 个, 成功删除 {deleted_count} 个")
+
+    clean_info = ""
+    if junk_files and deleted_count > 0:
+        clean_info = f"\n🧹 已清洗垃圾文件: {deleted_count}/{len(junk_files)} 个\n" + "\n".join(f"  - {r}" for _, r in junk_files)
+
+    send_wechat_reply(
+        user_id,
+        f"✅ 中转任务完成\n📦 保留文件: {moved_count}/{len(keep_files)} 个\n🤖 目标目录: {target_folder}{clean_info}"
+    )
+
+
+def _staging_cleanup_worker():
+    """后台线程：定期扫描中转任务，下载完成后自动清洗。"""
+    import time
+    log_info("中转清洗监控线程已启动")
+    while True:
+        time.sleep(5)
+        try:
+            with staging_lock:
+                tasks = list(staging_tasks.items())
+
+            for task_id, task in tasks:
+                if task.get("status") != "pending":
+                    continue
+
+                staging_path = task["staging_path"]
+
+                # 查离线任务状态
+                offline_files = _cd2_list_offline_files(staging_path)
+                if not offline_files:
+                    # 还没有离线任务记录，可能还没开始，继续等待
+                    continue
+
+                # 检查是否全部完成或出错
+                all_finished = all(f.status == clouddrive_pb2.OFFLINE_FINISHED for f in offline_files)
+                any_error = any(f.status == clouddrive_pb2.OFFLINE_ERROR for f in offline_files)
+
+                if any_error:
+                    with staging_lock:
+                        staging_tasks[task_id]["status"] = "failed"
+                    send_wechat_reply(
+                        task["user_id"],
+                        f"❌ 中转任务失败\n目标目录: {task['target_folder']}\n⚠️ 有离线任务出错，请检查 CD2 后台。"
+                    )
+                    continue
+
+                if not all_finished:
+                    continue  # 还有任务在下载中
+
+                # 全部完成，标记为处理中
+                with staging_lock:
+                    staging_tasks[task_id]["status"] = "processing"
+
+                # 处理任务（逐个文件有 5 秒间隔，可能耗时较长）
+                _process_staging_task(task)
+
+                # 标记完成
+                with staging_lock:
+                    staging_tasks[task_id]["status"] = "completed"
+
+        except Exception as e:
+            log_warn(f"中转监控线程异常: {e}")
+
+
+# --- 启动中转监控线程 ---
+if STAGING_FOLDER:
+    _cd2_ensure_folder_recursive(STAGING_FOLDER)
+    cleanup_thread = threading.Thread(target=_staging_cleanup_worker, daemon=True)
+    cleanup_thread.start()
+    log_info("中转清洗后台线程已启动")
+
+
 def _normalize_download_url(raw: str) -> str:
     raw = str(raw or "").strip()
     lowered = raw.lower()
@@ -442,57 +701,116 @@ def process_message_async(from_user, content):
         target_folder = _resolve_target_folder(parsed["route"], parsed["custom_subdir"])
         log_info(f"路由解析成功: route={parsed['route']}, subdir={parsed['custom_subdir'] or '-'}, target_folder={target_folder}")
 
-        # 清洗过滤（ed2k 链接可解析文件名与体积）
-        valid_urls = []
-        cleaned_items = []
+        # 分离 ed2k 和 magnet
+        ed2k_urls = []
+        magnet_urls = []
         for target_url in parsed["target_urls"]:
-            should_clean, reason = _should_cleanup(target_url)
-            if should_clean:
-                cleaned_items.append(reason)
-                log_info(f"清洗过滤: {reason}")
+            if target_url.lower().startswith("ed2k://"):
+                ed2k_urls.append(target_url)
             else:
-                valid_urls.append(target_url)
+                magnet_urls.append(target_url)
 
-        success_count = 0
-        fail_count = 0
-        fail_reasons = []
-        for target_url in valid_urls:
+        # ed2k 直接提交，不清洗
+        ed2k_success = 0
+        ed2k_fail = 0
+        ed2k_fail_reasons = []
+        for target_url in ed2k_urls:
             success, detail = cd2_offline_download(target_url, target_folder=target_folder)
             if success:
-                success_count += 1
+                ed2k_success += 1
             else:
-                fail_count += 1
-                fail_reasons.append(detail)
+                ed2k_fail += 1
+                ed2k_fail_reasons.append(detail)
 
-        extra = f"\n📂 子目录: {parsed['custom_subdir']}" if parsed["custom_subdir"] else ""
-        clean_info = ""
-        if cleaned_items:
-            clean_info = f"\n🧹 已过滤垃圾文件: {len(cleaned_items)} 个\n" + "\n".join(f"  - {item}" for item in cleaned_items)
+        # magnet 走中转清洗（如果配置了 STAGING_FOLDER）
+        staging_task_id = None
+        if STAGING_FOLDER and magnet_urls:
+            import uuid
+            task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+            staging_path = _join_path(STAGING_FOLDER, task_id)
+            _cd2_ensure_folder_recursive(staging_path)
 
-        total_submitted = len(valid_urls)
-        if fail_count == 0:
+            mag_success = 0
+            mag_fail = 0
+            mag_fail_reasons = []
+            for target_url in magnet_urls:
+                success, detail = cd2_offline_download(target_url, target_folder=staging_path)
+                if success:
+                    mag_success += 1
+                else:
+                    mag_fail += 1
+                    mag_fail_reasons.append(detail)
+
+            with staging_lock:
+                staging_tasks[task_id] = {
+                    "urls": magnet_urls,
+                    "target_folder": target_folder,
+                    "user_id": from_user,
+                    "status": "pending",
+                    "staging_path": staging_path,
+                    "submitted_at": datetime.now().isoformat(),
+                }
+            staging_task_id = task_id
+
+            extra = f"\n📂 子目录: {parsed['custom_subdir']}" if parsed["custom_subdir"] else ""
             send_wechat_reply(
                 from_user,
-                f"✅ 离线任务建立成功\n"
-                f"📦 提交数量: {success_count}{extra}{clean_info}\n"
-                f"🤖 状态: 提交成功 → {target_folder}"
+                f"📦 已提交到中转目录\n"
+                f"📦 magnet 数量: {mag_success}{extra}\n"
+                f"🤖 中转路径: {staging_path}\n"
+                f"⏳ 下载完成后自动清洗并转存到目标目录..."
             )
-        elif success_count == 0:
-            send_wechat_reply(
-                from_user,
-                f"❌ 离线任务失败\n"
-                f"📦 提交数量: {total_submitted}{extra}{clean_info}\n"
-                f"⚠️ 原因: {fail_reasons[0] if fail_reasons else '未知错误'}"
-            )
+        elif magnet_urls:
+            # 没配置 STAGING_FOLDER，magnet 直接提交
+            mag_success = 0
+            mag_fail = 0
+            mag_fail_reasons = []
+            for target_url in magnet_urls:
+                success, detail = cd2_offline_download(target_url, target_folder=target_folder)
+                if success:
+                    mag_success += 1
+                else:
+                    mag_fail += 1
+                    mag_fail_reasons.append(detail)
         else:
-            send_wechat_reply(
-                from_user,
-                f"⚠️ 部分离线成功\n"
-                f"✅ 成功: {success_count}\n"
-                f"❌ 失败: {fail_count}{extra}{clean_info}\n"
-                f"🤖 目标目录: {target_folder}\n"
-                f"⚠️ 首个失败原因: {fail_reasons[0] if fail_reasons else '未知错误'}"
-            )
+            mag_success = 0
+            mag_fail = 0
+            mag_fail_reasons = []
+
+        # 统一回复 ed2k 结果（magnet 中转的回复已单独发出）
+        extra = f"\n📂 子目录: {parsed['custom_subdir']}" if parsed["custom_subdir"] else ""
+        total_ed2k = len(ed2k_urls)
+        total_mag = len(magnet_urls)
+
+        if not ed2k_urls and not magnet_urls:
+            send_wechat_reply(from_user, "⚠️ 没有可提交的链接。")
+            return
+
+        # 只有 ed2k 且无中转任务时，才在这里回复
+        if ed2k_urls and not staging_task_id:
+            if ed2k_fail == 0:
+                send_wechat_reply(
+                    from_user,
+                    f"✅ 离线任务建立成功\n"
+                    f"📦 ed2k 提交数量: {ed2k_success}{extra}\n"
+                    f"🤖 状态: 提交成功 → {target_folder}"
+                )
+            elif ed2k_success == 0:
+                send_wechat_reply(
+                    from_user,
+                    f"❌ 离线任务失败\n"
+                    f"📦 ed2k 数量: {total_ed2k}{extra}\n"
+                    f"⚠️ 原因: {ed2k_fail_reasons[0] if ed2k_fail_reasons else '未知错误'}"
+                )
+            else:
+                send_wechat_reply(
+                    from_user,
+                    f"⚠️ 部分离线成功\n"
+                    f"✅ ed2k 成功: {ed2k_success}\n"
+                    f"❌ ed2k 失败: {ed2k_fail}{extra}\n"
+                    f"🤖 目标目录: {target_folder}\n"
+                    f"⚠️ 首个失败原因: {ed2k_fail_reasons[0] if ed2k_fail_reasons else '未知错误'}"
+                )
         return
 
     send_wechat_reply(

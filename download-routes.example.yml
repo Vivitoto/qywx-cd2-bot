@@ -1,29 +1,28 @@
 default_route: main
 
+# 全局中转清洗目录（所有路由共用）
+# 配置了则磁力链接先下载到这里，完成后自动清洗并转存到目标目录
+# 留空或删除则磁力链接直接提交到目标目录，ed2k 始终直接提交
+staging_folder: /115open/staging
+
 routes:
   # ----------------------------------------------------------
   # main：默认离线路由
   # ----------------------------------------------------------
   main:
-    path: /115open/磁力              # 基础目录。离线任务默认存到这里
-    organize_by_date: true         # true=自动追加日期目录，如 /2026-04-22
-    allow_subdir: true             # true=允许 /main @目录名 链接 这种写法
-    comment: 默认离线目录           # 备注说明，只给人看，程序不会用它做逻辑判断
+    path: /115open/磁力
+    organize_by_date: true
+    allow_subdir: true
+    comment: 默认离线目录
 
-  # ----------------------------------------------------------
-  # sub：手动分类路由
-  # ----------------------------------------------------------
   sub:
-    path: /115open/手动转存         # 基础目录。适合手动分类转存
-    organize_by_date: true         # true=自动追加日期目录，如 /2026-04-22
-    allow_subdir: true             # true=允许 /sub @目录名 链接 这种写法
-    comment: 手动转存目录           # 备注说明，只给人看，程序不会用它做逻辑判断
+    path: /115open/手动转存
+    organize_by_date: true
+    allow_subdir: true
+    comment: 手动转存目录
 
-  # ----------------------------------------------------------
-  # temp：临时目录路由
-  # ----------------------------------------------------------
   temp:
-    path: /115open/临时             # 基础目录。适合临时转存
-    organize_by_date: false        # false=不追加日期目录
-    allow_subdir: false            # false=不允许 /temp @目录名 链接
+    path: /115open/临时
+    organize_by_date: false
+    allow_subdir: false
     comment: 临时目录，不允许自定义子目录
