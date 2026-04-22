@@ -166,7 +166,15 @@ def cd2_offline_download(target_url):
     except Exception as e:
         return False, f"系统异常: {str(e)}"
 
-def process_message_async(from_user, content):
+def _normalize_magnet(raw: str) -> str:
+    """补全非标准磁力链接为完整 magnet URI。"""
+    raw = str(raw or '').strip()
+    if raw.startswith("magnet:") or raw.startswith("http"):
+        return raw
+    # 纯 40 位 hex hash（不区分大小写）自动补全
+    if re.fullmatch(r'[0-9a-fA-F]{40}', raw):
+        return f"magnet:?xt=urn:btih:{raw.upper()}"
+    return raw
     # 【模式1】用户发送纯数字序号进行选择下载
     if content.isdigit():
         if from_user in user_search_cache:
@@ -175,7 +183,7 @@ def process_message_async(from_user, content):
             
             if 0 <= idx < len(cached_results):
                 selected_item = cached_results[idx]
-                target_url = selected_item["url"]
+                target_url = _normalize_magnet(selected_item["url"])
                 
                 send_wechat_reply(from_user, f"⏳ 正在推送: {selected_item['title'][:30]}...")
                 success, detail = cd2_offline_download(target_url)
@@ -191,8 +199,9 @@ def process_message_async(from_user, content):
         return
 
     # 【模式2】用户直接发送磁力/种子链接
-    if content.startswith("magnet:?") or content.startswith("http"):
-        success, detail = cd2_offline_download(content)
+    if content.startswith("magnet:?") or content.startswith("http") or re.fullmatch(r'[0-9a-fA-F]{40}', content):
+        target_url = _normalize_magnet(content)
+        success, detail = cd2_offline_download(target_url)
         if success:
             send_wechat_reply(from_user, f"✅ 直链离线成功\n🤖 状态: {detail}")
         else:
