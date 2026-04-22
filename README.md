@@ -13,6 +13,7 @@
 * 🗂️ **YAML 路由配置：** 下载目录改为 `download-routes.yml` 管理，可自由定义 `/main`、`/sub`、`/temp` 等任意路由。
 * 🪄 **自定义子目录：** 支持 `/sub @你好 磁链/哈希` 这种格式，自动落到类似 `/115open/手动转存/@你好/2026-04-22` 的路径，不存在则自动创建。
 * 📦 **批量提交：** 支持一条消息中提交多个 magnet / ed2k / 直链，统一落到同一路径。
+* 🧹 **清洗过滤（新增）：** 支持按文件后缀 + 体积阈值过滤垃圾文件，ed2k 链接可在提交前自动识别并跳过。
 
 ---
 
@@ -61,8 +62,10 @@ services:
       - CD2_HOST=192.168.x.x:19798            # CD2 的内网 IP 和端口，不要带 http://
       - CD2_TOKEN=你的CD2_API令牌              # token 权限至少要给离线下载（建议网盘权限全开）
 
-      # --- 下载路由配置文件路径 ---
-      - DOWNLOAD_ROUTES_CONFIG=/config/download-routes.yml
+      # --- 清洗过滤配置（可选） ---
+      - ENABLE_CLEANUP=false                    # true=开启清洗过滤
+      - JUNK_EXTENSIONS=txt,url,html,mhtml,htm,mht,mp4,exe,rar,apk,gif,png,jpg  # 垃圾后缀黑名单
+      - JUNK_SIZE_THRESHOLD_MB=                 # 体积阈值（MB），留空则不执行清洗
     volumes:
       - ./config:/config
 ```
@@ -72,6 +75,16 @@ services:
 > - 初始化后可直接编辑宿主机上的 `./config/download-routes.yml`。
 > - 修改路由配置后，重启容器即可生效。
 > - 容器现在使用 **Gunicorn** 启动，不再出现 Flask development server 的那条警告。
+
+> 💡 **清洗过滤说明**
+> - `ENABLE_CLEANUP=true` 时开启清洗。
+> - 仅对 **ed2k 链接**生效（ed2k 协议本身携带文件名和体积）。
+> - **同时满足**“后缀在黑名单”且“体积 < 阈值”时，该文件会被跳过，不提交离线任务。
+> - 被清洗的文件会在企微通知里列出。
+> - 示例：
+>   - `JUNK_EXTENSIONS=txt`
+>   - `JUNK_SIZE_THRESHOLD_MB=50`
+>   - 则体积 < 50MB 的 txt 文件会被过滤掉。
 
 #### 1.1 `download-routes.yml`
 
@@ -129,4 +142,26 @@ magnet:?xt=urn:btih:E808151805F0A2C8C281FBEFA682AD29EDA73FF2
 
 回复：✅ 离线任务建立成功，统一落到 `/115open/手动转存/@你好/2026-04-22`
 
-<!-- build trigger: 2026-04-22T03:47:19.216004 -->
+### 场景 5：清洗过滤示例
+
+环境变量配置：
+```
+ENABLE_CLEANUP=true
+JUNK_EXTENSIONS=txt,url
+JUNK_SIZE_THRESHOLD_MB=50
+```
+
+发送：
+```text
+/sub @你好
+ed2k://|file|test.txt|1000000|ABCDEF1234567890ABCDEF1234567890|/
+ed2k://|file|movie.mkv|60000000|ABCDEF1234567890ABCDEF1234567890|/
+```
+
+回复：
+> ✅ 离线任务建立成功
+> 📦 提交数量: 1
+> 🧹 已过滤垃圾文件: 1 个
+>   - test.txt (txt, 1.0MB < 50.0MB)
+> 🤖 状态: 提交成功 → /115open/手动转存/@你好
+

@@ -40,8 +40,10 @@ CD2_TOKEN = os.getenv("CD2_TOKEN")
 DOWNLOAD_ROUTES_CONFIG = os.getenv("DOWNLOAD_ROUTES_CONFIG", "/config/download-routes.yml")
 DOWNLOAD_ROUTES_EXAMPLE = os.getenv("DOWNLOAD_ROUTES_EXAMPLE", "/app/download-routes.example.yml")
 
-# --- 内存缓存区 ---
-recent_msg_ids = []
+# --- 4. 清洗配置 ---
+ENABLE_CLEANUP = os.getenv("ENABLE_CLEANUP", "false").lower() in ("true", "1", "yes", "on")
+JUNK_EXTENSIONS = os.getenv("JUNK_EXTENSIONS", "txt,url,html,mhtml,htm,mht,mp4,exe,rar,apk,gif,png,jpg")
+JUNK_SIZE_THRESHOLD_MB = os.getenv("JUNK_SIZE_THRESHOLD_MB")
 user_search_cache = {}
 DOWNLOAD_ROUTES = {}
 DEFAULT_DOWNLOAD_ROUTE = "main"
@@ -118,7 +120,55 @@ log_info("企业微信加解密模块初始化成功")
 
 
 
-def format_size(size_bytes):
+def _parse_ed2k_info(url: str):
+    """从 ed2k 链接解析文件名和大小(bytes)。返回 (filename, size_bytes) 或 (None, None)。"""
+    match = re.match(r'ed2k://\|file\|([^|]+)\|(\d+)\|[a-fA-F0-9]{32}\|/', url, re.IGNORECASE)
+    if not match:
+        return None, None
+    return match.group(1), int(match.group(2))
+
+
+def _get_junk_extensions() -> set:
+    return set(e.strip().lower() for e in JUNK_EXTENSIONS.split(",") if e.strip())
+
+
+def _get_size_threshold_mb() -> float | None:
+    val = str(JUNK_SIZE_THRESHOLD_MB or "").strip()
+    return float(val) if val else None
+
+
+def _should_cleanup(url: str) -> tuple[bool, str]:
+    """判断是否应清洗该链接。返回 (should_cleanup, reason)。"""
+    if not ENABLE_CLEANUP:
+        return False, ""
+
+    threshold = _get_size_threshold_mb()
+    if not threshold:
+        return False, ""
+
+    if not url.lower().startswith("ed2k://"):
+        return False, ""
+
+    filename, size_bytes = _parse_ed2k_info(url)
+    if filename is None:
+        return False, ""
+
+    ext = ""
+    if "." in filename:
+        ext = filename.rsplit(".", 1)[-1].lower()
+
+    if ext not in _get_junk_extensions():
+        return False, ""
+
+    size_mb = size_bytes / (1024 * 1024)
+    if size_mb >= threshold:
+        return False, ""
+
+    reason = f"{filename} ({ext}, {size_mb:.1f}MB < {threshold}MB)"
+    return True, reason
+
+
+
     if not size_bytes:
         return "未知大小"
     size_mb = size_bytes / (1024 * 1024)
@@ -391,10 +441,22 @@ def process_message_async(from_user, content):
 
         target_folder = _resolve_target_folder(parsed["route"], parsed["custom_subdir"])
         log_info(f"路由解析成功: route={parsed['route']}, subdir={parsed['custom_subdir'] or '-'}, target_folder={target_folder}")
+
+        # 清洗过滤（ed2k 链接可解析文件名与体积）
+        valid_urls = []
+        cleaned_items = []
+        for target_url in parsed["target_urls"]:
+            should_clean, reason = _should_cleanup(target_url)
+            if should_clean:
+                cleaned_items.append(reason)
+                log_info(f"清洗过滤: {reason}")
+            else:
+                valid_urls.append(target_url)
+
         success_count = 0
         fail_count = 0
         fail_reasons = []
-        for target_url in parsed["target_urls"]:
+        for target_url in valid_urls:
             success, detail = cd2_offline_download(target_url, target_folder=target_folder)
             if success:
                 success_count += 1
@@ -403,18 +465,23 @@ def process_message_async(from_user, content):
                 fail_reasons.append(detail)
 
         extra = f"\n📂 子目录: {parsed['custom_subdir']}" if parsed["custom_subdir"] else ""
+        clean_info = ""
+        if cleaned_items:
+            clean_info = f"\n🧹 已过滤垃圾文件: {len(cleaned_items)} 个\n" + "\n".join(f"  - {item}" for item in cleaned_items)
+
+        total_submitted = len(valid_urls)
         if fail_count == 0:
             send_wechat_reply(
                 from_user,
                 f"✅ 离线任务建立成功\n"
-                f"📦 数量: {success_count}{extra}\n"
+                f"📦 提交数量: {success_count}{extra}{clean_info}\n"
                 f"🤖 状态: 提交成功 → {target_folder}"
             )
         elif success_count == 0:
             send_wechat_reply(
                 from_user,
                 f"❌ 离线任务失败\n"
-                f"📦 数量: {len(parsed['target_urls'])}\n"
+                f"📦 提交数量: {total_submitted}{extra}{clean_info}\n"
                 f"⚠️ 原因: {fail_reasons[0] if fail_reasons else '未知错误'}"
             )
         else:
@@ -422,7 +489,7 @@ def process_message_async(from_user, content):
                 from_user,
                 f"⚠️ 部分离线成功\n"
                 f"✅ 成功: {success_count}\n"
-                f"❌ 失败: {fail_count}{extra}\n"
+                f"❌ 失败: {fail_count}{extra}{clean_info}\n"
                 f"🤖 目标目录: {target_folder}\n"
                 f"⚠️ 首个失败原因: {fail_reasons[0] if fail_reasons else '未知错误'}"
             )
