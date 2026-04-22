@@ -542,8 +542,8 @@ def _process_staging_task(task: dict):
     log_info(f"中转清洗统计: 总条目 {len(entries)} 个, 保留 {moved_items} 个, 垃圾文件 {deleted_items} 个")
 
     clean_info = ""
-    if junk_list and deleted_items > 0:
-        clean_info = f"\n🧹 已清洗垃圾文件: {deleted_items} 个\n" + "\n".join(f"  - {r}" for r in junk_list)
+    if deleted_items > 0:
+        clean_info = f"\n🧹 已清洗垃圾文件: {deleted_items} 个"
 
     send_wechat_reply(
         user_id,
@@ -969,6 +969,42 @@ def wechat_callback():
             log_warn(traceback.format_exc())
             return "success"
 
+
+
+def init_wechat_menu():
+    """尝试自动初始化企业微信应用自定义菜单。"""
+    try:
+        token_url = f"{WECHAT_PROXY}/cgi-bin/gettoken?corpid={CORP_ID}&corpsecret={APP_SECRET}"
+        token_res = requests.get(token_url, timeout=10).json()
+        access_token = token_res.get("access_token")
+        if not access_token:
+            log_warn("企微菜单初始化失败：无法获取 access_token")
+            return
+
+        menu_data = {
+            "button": [
+                {
+                    "type": "click",
+                    "name": "任务状态",
+                    "key": "status"
+                }
+            ]
+        }
+
+        menu_url = f"{WECHAT_PROXY}/cgi-bin/menu/create?access_token={access_token}&agentid={AGENT_ID}"
+        res = requests.post(menu_url, json=menu_data, timeout=10).json()
+        if res.get("errcode") == 0:
+            log_info("企微应用菜单初始化成功：任务状态")
+        elif res.get("errcode") == 46003:
+            log_info("企微应用菜单已存在，无需重复创建")
+        else:
+            log_warn(f"企微菜单初始化失败: {res}")
+    except Exception as e:
+        log_warn(f"企微菜单初始化异常: {e}")
+
+
+# 尝试初始化企微菜单
+init_wechat_menu()
 
 log_info("转存功能模块初始化成功")
 
