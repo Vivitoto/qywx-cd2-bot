@@ -186,10 +186,16 @@ def _cd2_create_folder(folder_path):
         log_warn("CD2 创建目录失败：未配置 CD2_TOKEN")
         return False
     try:
+        # CD2 CreateFolderRequest 字段是 parentPath + folderName，不是 path
+        folder_path = str(folder_path or "").strip().rstrip("/")
+        if not folder_path or folder_path == "/":
+            return True
+        parent_path = "/".join(folder_path.split("/")[:-1]) or "/"
+        folder_name = folder_path.split("/")[-1]
         channel = grpc.insecure_channel(CD2_HOST)
         stub = clouddrive_pb2_grpc.CloudDriveFileSrvStub(channel)
         metadata = [("authorization", f"Bearer {CD2_TOKEN}")]
-        req = clouddrive_pb2.CreateFolderRequest(path=folder_path)
+        req = clouddrive_pb2.CreateFolderRequest(parentPath=parent_path, folderName=folder_name)
         stub.CreateFolder(req, metadata=metadata, timeout=10)
         log_info(f"CD2 目录创建成功: {folder_path}")
         return True
