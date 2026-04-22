@@ -1,0 +1,22 @@
+# 下载路由配置示例
+# default_route: 默认路由名；直接发送 magnet / ed2k / hash / torrent 链接时走这里。
+default_route: main
+
+routes:
+  main:
+    path: /115open/磁力
+    organize_by_date: true
+    allow_subdir: true
+    comment: 默认离线目录
+
+  sub:
+    path: /115open/手动转存
+    organize_by_date: true
+    allow_subdir: true
+    comment: 手动转存目录
+
+  temp:
+    path: /115open/临时
+    organize_by_date: false
+    allow_subdir: false
+    comment: 临时目录，不允许自定义子目录

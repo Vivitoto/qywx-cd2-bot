@@ -10,8 +10,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 ADD https://www.clouddrive2.com/api/clouddrive.proto .
 RUN python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. clouddrive.proto
 
-# 放入主程序
+# 放入主程序和示例配置
 COPY app.py .
+COPY download-routes.example.yml .
+RUN mkdir -p /config
 
 EXPOSE 5000
 

@@ -1,17 +1,18 @@
 # 🤖 企业微信 CD2 离线下载机器人 (vito-cd2-bot)
 
-基于 Python + Flask + gRPC 构建的企业微信机器人。将你的企业微信打造成一个**全自动找资源 + 离线下载的超级中枢**！发送车牌号，一键检索并推送到本地的 CloudDrive2 进行离线下载。
+基于 Python + Flask + gRPC 构建的企业微信机器人。将你的企业微信打造成一个**直链 / 磁链 / ED2K 离线下载中枢**，把消息直接推送到本地的 CloudDrive2 进行离线下载。
 
-> 本项目 fork 自 [jiumian8/jiumian-cd2-bot](https://github.com/jiumian8/jiumian-cd2-bot)，在此基础上新增了**按日期自动归档**功能。
+> 本项目 fork 自 [jiumian8/jiumian-cd2-bot](https://github.com/jiumian8/jiumian-cd2-bot)，在此基础上重构为**YAML 路由化下载目录**，并新增了**按路由独立日期归档**、**自定义离线子目录**、**ED2K 支持**、**多链接批量提交**等功能。
 
 ## ✨ 核心功能 (Features)
 
-* 🧲 **直链解析：** 直接发送磁力链接 (`magnet:?`) 或 种子下载链接 (`http://...*.torrent`)，秒推 CD2 离线下载。
-* 🔍 **聚合搜索：** 发送番号/车牌或电影关键词，自动调用本地 Prowlarr 接口进行全网 BT 站（如 Sukebei、BTDigg 等）检索。
-* 🔢 **交互式选择：** 搜索完毕后返回带文件大小和做种人数的资源列表，**只需回复序号（如 `1`、`2`）即可精准下载**。
+* 🧲 **直链解析：** 直接发送磁力链接 (`magnet:?`)、种子下载链接 (`http://...*.torrent`)、ED2K 链接 (`ed2k://...`) 或 40 位 info_hash，秒推 CD2 离线下载。
 * ⚡ **底层通信：** 彻底抛弃低效的网页模拟，采用官方标准的 **gRPC 协议 + JWT Token** 与 CloudDrive2 通信，极速且稳定。
 * 🛡️ **防重防抖：** 内置异步线程与消息去重机制，完美绕过企业微信服务器“5秒内无响应自动重试三次”的变态机制。
-* 📅 **日期归档（新增）：** 转存时自动在目标路径下创建 `YYYY-MM-DD` 日期目录，每日资源自动隔离，方便查找整理。
+* 📅 **日期归档（新增）：** 每个下载路由可独立决定是否在目标路径末尾创建 `YYYY-MM-DD` 日期目录。
+* 🗂️ **YAML 路由配置：** 下载目录改为 `download-routes.yml` 管理，可自由定义 `/main`、`/sub`、`/temp` 等任意路由。
+* 🪄 **自定义子目录：** 支持 `/sub @你好 磁链/哈希` 这种格式，自动落到类似 `/115open/手动转存/@你好/2026-04-22` 的路径，不存在则自动创建。
+* 📦 **批量提交：** 支持一条消息中提交多个 magnet / ed2k / 直链，统一落到同一路径。
 
 ---
 
@@ -22,7 +23,6 @@
 1.  **企业微信管理员权限：** 需要创建一个【自建应用】，并获取 `CORP_ID`, `APP_SECRET`, `AGENT_ID`, `APP_TOKEN`, `ENCODING_AES_KEY`。
 2.  **企业微信 API 反向代理：** 企微新规要求回调地址必须有固定 IP。你需要一台拥有公网固定 IP 的服务器搭建反代（如 Nginx），代理目标为 `https://qyapi.weixin.qq.com`。
 3.  **CloudDrive2：** 运行在本地 NAS/PVE 上。需在后台生成 **API 令牌 (Token)**。
-4.  **Prowlarr：** 运行在本地 NAS/PVE 上的聚合索引器。需配置好常用的 Indexer（如 Sukebei），并获取 **API Key**。
 
 ---
 
@@ -30,46 +30,7 @@
 
 推荐使用 Docker Compose 进行部署。
 
-### 🛠️ 第一部分：Prowlarr 部署与配置 (聚合搜索中心)
-
-Prowlarr 是本系统的“眼睛”，负责从全球各大索引站抓取资源。
-
-#### 1. Docker 部署
-
-在你的 PVE 或 NAS 上创建 prowlarr 目录，新建 docker-compose.yml：
-
-```yaml
-version: '3'
-services:
-  prowlarr:
-    image: ghcr.io/linuxserver/prowlarr:latest
-    container_name: prowlarr
-    environment:
-      - PUID=0
-      - PGID=0
-      - TZ=Asia/Shanghai
-    ports:
-      - 9696:9696
-    restart: unless-stopped
-```
-
-运行 `docker compose up -d` 启动。
-
-#### 2. 初始化教程
-
-访问后台：浏览器打开 http://你的IP:9696
-
-**添加索引器 (Indexer)：**
-- 点击左侧 Indexers -> Add Indexer。
-- 搜索并添加 Sukebei (找车牌神器) 和 Solid Torrents (通用搜索)。
-- 点击 Save 保存。
-
-**获取 API Key：**
-- 前往 Settings -> General -> 复制 API Key（稍后填入机器人配置）。
-
----
-
-### 🛠️ 第二部分：vito-cd2-bot 部署
+### 🛠️ 部署：vito-cd2-bot
 
 #### 1. 创建 `docker-compose.yml`
 
@@ -80,7 +41,7 @@ version: '3.8'
 
 services:
   vito-cd2-bot:
-    image: ghcr.io/vivitoto/vito-cd2-bot:latest
+    image: vivitoto/vito-cd2-bot:latest
     container_name: vito-cd2-bot
     restart: unless-stopped
     ports:
@@ -97,27 +58,58 @@ services:
       - WECHAT_PROXY=http://你的反向代理IP:端口
 
       # --- CloudDrive2 配置 ---
-      - CD2_HOST=192.168.x.x:19798       # CD2 的内网 IP 和端口，不要带 http://
-      - CD2_TOKEN=你的CD2_API令牌         # token 权限至少要给离线下载（建议网盘权限全开）
-      - DOWNLOAD_PATH=/115/离线下载目录   # CD2 中真实存在的挂载路径
-      - ORGANIZE_BY_DATE=true             # true = 自动在 DOWNLOAD_PATH 下创建 YYYY-MM-DD 日期目录（默认开启）
+      - CD2_HOST=192.168.x.x:19798            # CD2 的内网 IP 和端口，不要带 http://
+      - CD2_TOKEN=你的CD2_API令牌              # token 权限至少要给离线下载（建议网盘权限全开）
 
-      # --- Prowlarr 聚合搜索配置 ---
-      - PROWLARR_URL=http://192.168.x.x:9696  # Prowlarr 的内网地址，必须带 http://
-      - PROWLARR_API_KEY=你的Prowlarr_API_Key
+      # --- 下载路由配置文件路径 ---
+      - DOWNLOAD_ROUTES_CONFIG=/config/download-routes.yml
+    volumes:
+      - ./config:/config
 ```
 
-> 💡 **日期归档示例**
-> - `DOWNLOAD_PATH=/115open/磁力`
-> - 今天是 `2026-04-22`
-> - 实际转存路径 → `/115open/磁力/2026-04-22`
-> - 明天 → `/115open/磁力/2026-04-23`
+> 💡 **首次启动说明**
+> - 容器首次启动时，若 `/config/download-routes.yml` 不存在，会自动从镜像里的示例文件初始化一份。
+> - 初始化后可直接编辑宿主机上的 `./config/download-routes.yml`。
+> - 修改路由配置后，重启容器即可生效。
+
+#### 1.1 `download-routes.yml` 示例
+
+```yaml
+# 下载路由配置示例
+# default_route: 默认路由名；直接发送 magnet / ed2k / hash / torrent 链接时走这里。
+default_route: main
+
+routes:
+  main:
+    path: /115open/磁力
+    organize_by_date: true
+    allow_subdir: true
+    comment: 默认离线目录
+
+  sub:
+    path: /115open/手动转存
+    organize_by_date: true
+    allow_subdir: true
+    comment: 手动转存目录
+
+  temp:
+    path: /115open/临时
+    organize_by_date: false
+    allow_subdir: false
+    comment: 临时目录，不允许自定义子目录
+```
+
+> 💡 **路径示例**
+> - 默认磁链 → `/115open/磁力/2026-04-22`
+> - `/sub E808...` → `/115open/手动转存/2026-04-22`
+> - `/sub @你好 E808...` → `/115open/手动转存/@你好/2026-04-22`
+> - `/temp E808...` → `/115open/临时`
 
 #### 2. 配置企业微信回调
 
 前往企业微信后台 -> 应用管理 -> 你的应用 -> 接收消息 -> 设置 API 接收。
 
-- **URL:** 填写 `http://你的公网穿透域名或IP:5000/wechat` **(注意结尾必须带 `/wechat`)**
+- **URL:** 若按上面的端口映射 `5110:5000` 部署，则填写 `http://你的公网穿透域名或IP:5110/wechat` **(注意结尾必须带 `/wechat`)**
 - **Token / EncodingAESKey:** 与 docker-compose 中的配置保持一致。
 
 点击保存，提示成功即可！
@@ -132,21 +124,35 @@ services:
 
 发送：`magnet:?xt=urn:btih:XXXXXX`
 
-回复：✅ 直链离线成功 → `/115open/磁力/2026-04-22`
+回复：✅ 离线任务建立成功 → `/115open/磁力/2026-04-22`
 
-### 场景 2：搜索资源
+### 场景 1.1：直接发送 ed2k
 
-发送：`SDMM-229` 或 `漫威`
+发送：`ed2k://|file|demo.mkv|123456|ABCDEF1234567890ABCDEF1234567890|/`
 
-回复：
-> 🔍 找到 8 个结果，请直接回复【序号】下载：
-> 1. [4.60 GB] SDMM-229 高清版 (源:sukebei 种:123)
-> 2. [2.10 GB] SDMM-229 压缩版 (源:btdigg 种:45)
+回复：✅ 离线任务建立成功 → `/115open/磁力/2026-04-22`
 
-### 场景 3：选择下载
+### 场景 2：离线到 sub 目录
 
-发送：`1`
+发送：`/sub E808151805F0A2C8C281FBEFA682AD29EDA73FF2`
 
-回复：✅ 离线任务建立成功！→ `/115open/磁力/2026-04-22`
+回复：✅ 离线任务建立成功！→ `/115open/手动转存/2026-04-22`
+
+### 场景 3：离线到自定义子目录
+
+发送：`/sub @你好 E808151805F0A2C8C281FBEFA682AD29EDA73FF2`
+
+回复：✅ 离线任务建立成功！→ `/115open/手动转存/@你好/2026-04-22`
+
+### 场景 4：一次提交多个 magnet / ed2k
+
+发送：
+```text
+/sub @你好
+ed2k://|file|a.mkv|111|HASH1|/
+magnet:?xt=urn:btih:E808151805F0A2C8C281FBEFA682AD29EDA73FF2
+```
+
+回复：✅ 离线任务建立成功，统一落到 `/115open/手动转存/@你好/2026-04-22`
 
 <!-- build trigger: 2026-04-22T03:47:19.216004 -->

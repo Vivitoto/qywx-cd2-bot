@@ -4,3 +4,4 @@ pycryptodome
 requests
 grpcio
 grpcio-tools
+PyYAML
