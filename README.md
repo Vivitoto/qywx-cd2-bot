@@ -50,7 +50,7 @@ services:
 运行 docker compose up -d 启动。
 
 2. 初始化教程
-访问后台： 浏览器打开 http://你的IP:9696。
+访问后台： 浏览器打开 http://你的IP:9696
 
 添加索引器 (Indexer)：
 
