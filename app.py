@@ -51,6 +51,8 @@ STAGING_FOLDER = ""
 staging_tasks = {}
 staging_lock = threading.Lock()
 
+recent_msg_ids = []
+
 user_search_cache = {}
 DOWNLOAD_ROUTES = {}
 DEFAULT_DOWNLOAD_ROUTE = "main"
