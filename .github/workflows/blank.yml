@@ -2,7 +2,7 @@ name: Docker Build and Push to GHCR
 
 on:
   push:
-    branches: [ "main" ] # 每次推送到 main 分支时自动触发
+    branches: [ "main" ]
 
 jobs:
   build-and-push-image:
@@ -27,5 +27,4 @@ jobs:
         with:
           context: .
           push: true
-          # 把下面的 YOUR_GITHUB_USERNAME 换成你的 GitHub 用户名（全小写）
-          tags: ghcr.io/jiumian8/qywx-cd2-bot:latest
+          tags: ghcr.io/vivitoto/vito-cd2-bot:latest
