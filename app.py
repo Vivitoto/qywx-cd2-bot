@@ -843,20 +843,40 @@ def wechat_callback():
             if msg_id_node is not None:
                 msg_id = msg_id_node.text
                 if msg_id in recent_msg_ids:
+                    log_info(f"消息去重跳过: msg_id={msg_id}")
                     return "success"
                 recent_msg_ids.append(msg_id)
                 if len(recent_msg_ids) > 100:
                     recent_msg_ids.pop(0)
 
-            msg_type = tree.find("MsgType").text
-            from_user = tree.find("FromUserName").text
+            msg_type_node = tree.find("MsgType")
+            if msg_type_node is None:
+                log_warn("企微回调缺少 MsgType 节点")
+                return "success"
+            msg_type = msg_type_node.text
+
+            from_user_node = tree.find("FromUserName")
+            if from_user_node is None:
+                log_warn("企微回调缺少 FromUserName 节点")
+                return "success"
+            from_user = from_user_node.text
 
             if msg_type == "text":
-                content = tree.find("Content").text.strip()
+                content_node = tree.find("Content")
+                if content_node is None or content_node.text is None:
+                    log_warn("企微回调缺少 Content 节点或内容为空")
+                    return "success"
+                content = content_node.text.strip()
+                log_info(f"收到企微消息: from={from_user}, content={content[:100]}")
                 threading.Thread(target=process_message_async, args=(from_user, content)).start()
+            else:
+                log_info(f"收到非文本消息: msg_type={msg_type}, from={from_user}")
 
             return "success"
-        except Exception:
+        except Exception as e:
+            log_warn(f"企微回调处理异常: {e}")
+            import traceback
+            log_warn(traceback.format_exc())
             return "success"
 
 
