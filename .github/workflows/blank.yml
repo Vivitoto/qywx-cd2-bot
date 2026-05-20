@@ -43,7 +43,6 @@ jobs:
             vivitoto/qywx-cd2-bot
             ghcr.io/vivitoto/qywx-cd2-bot
           tags: |
-            type=ref,event=branch
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}

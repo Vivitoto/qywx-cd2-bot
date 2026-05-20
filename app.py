@@ -207,12 +207,12 @@ def _get_size_threshold_mb() -> Optional[float]:
 
 
 
-def send_wechat_reply(touser, content):
+def send_wechat_reply(touser, content) -> bool:
     try:
         ok, access_token, message = _get_wechat_access_token(timeout=10)
         if not ok:
             log_warn(f"微信回复失败: {message}")
-            return
+            return False
 
         send_url = f"{WECHAT_PROXY}/cgi-bin/message/send?access_token={access_token}"
         payload = {
@@ -221,10 +221,19 @@ def send_wechat_reply(touser, content):
             "agentid": AGENT_ID,
             "text": {"content": content},
         }
-        requests.post(send_url, json=payload, timeout=10)
+        res = requests.post(send_url, json=payload, timeout=10)
+        try:
+            data = res.json()
+        except Exception:
+            data = {"status_code": res.status_code, "text": res.text[:200]}
+        if res.status_code == 200 and data.get("errcode") == 0:
+            log_info(f"微信回复发送成功: touser={touser}, len={len(content)}")
+            return True
+        log_warn(f"微信回复发送失败: status={res.status_code}, response={data}")
+        return False
     except Exception as e:
         log_warn(f"微信回复失败: {e}")
-
+        return False
 
 
 
@@ -574,12 +583,43 @@ def _staging_cleanup_worker():
                 # 查离线任务状态
                 offline_files = _cd2_list_offline_files(staging_path)
                 if not offline_files:
-                    # 还没有离线任务记录，可能还没开始，继续等待
-                    continue
+                    # 离线记录为空时，先看是否需要做目录兜底扫描（每 6 个周期一次≈30 秒，避免频繁调 CD2）
+                    with staging_lock:
+                        cycle = staging_tasks[task_id].get("empty_offline_cycles", 0) + 1
+                        staging_tasks[task_id]["empty_offline_cycles"] = cycle
+                    if cycle % 6 != 0:
+                        continue  # 非扫描周期，跳过
 
-                # 检查是否全部完成或出错
-                all_finished = all(f.status == clouddrive_pb2.OFFLINE_FINISHED for f in offline_files)
-                any_error = any(f.status == clouddrive_pb2.OFFLINE_ERROR for f in offline_files)
+                    entries = _cd2_list_directory_files(staging_path)
+                    if not entries:
+                        # 还没有离线任务记录，也没有文件，继续等待
+                        with staging_lock:
+                            staging_tasks[task_id].pop("empty_offline_snapshot", None)
+                            staging_tasks[task_id].pop("empty_offline_stable_checks", None)
+                        continue
+
+                    snapshot = tuple(sorted(
+                        f"{getattr(entry, 'fullPathName', '')}|{getattr(entry, 'fileType', '')}|{getattr(entry, 'size', '')}"
+                        for entry in entries
+                    ))
+                    with staging_lock:
+                        old_snapshot = staging_tasks[task_id].get("empty_offline_snapshot")
+                        stable_checks = staging_tasks[task_id].get("empty_offline_stable_checks", 0)
+                        stable_checks = stable_checks + 1 if old_snapshot == snapshot else 1
+                        staging_tasks[task_id]["empty_offline_snapshot"] = snapshot
+                        staging_tasks[task_id]["empty_offline_stable_checks"] = stable_checks
+
+                    if stable_checks < 3:
+                        log_warn(f"离线任务记录为空但中转目录已有文件，等待目录稳定: {staging_path} ({stable_checks}/3)")
+                        continue
+
+                    log_warn(f"离线任务记录为空但中转目录连续稳定，按完成状态处理: {staging_path}")
+                    all_finished = True
+                    any_error = False
+                else:
+                    # 检查是否全部完成或出错
+                    all_finished = all(f.status == clouddrive_pb2.OFFLINE_FINISHED for f in offline_files)
+                    any_error = any(f.status == clouddrive_pb2.OFFLINE_ERROR for f in offline_files)
 
                 if any_error:
                     with staging_lock:
@@ -602,18 +642,28 @@ def _staging_cleanup_worker():
                 with staging_lock:
                     staging_tasks[task_id]["status"] = "processing"
 
-                # 处理任务（逐个文件有 5 秒间隔，可能耗时较长）
-                _process_staging_task(task)
-
-                # 标记完成，并清理空中转子目录
-                with staging_lock:
-                    staging_tasks[task_id]["status"] = "completed"
-                # 尝试删除已清空的中转子目录
                 try:
-                    _cd2_delete_file(staging_path)
-                    log_info(f"中转子目录已清理: {staging_path}")
+                    # 处理任务（逐个文件有 5 秒间隔，可能耗时较长）
+                    _process_staging_task(task)
+
+                    # 标记完成，并清理空中转子目录
+                    with staging_lock:
+                        staging_tasks[task_id]["status"] = "completed"
+                    # 尝试删除已清空的中转子目录
+                    try:
+                        _cd2_delete_file(staging_path)
+                        log_info(f"中转子目录已清理: {staging_path}")
+                    except Exception as e:
+                        log_warn(f"中转子目录清理失败（非关键）: {staging_path} / {e}")
+                    time.sleep(1)  # 文件操作收尾
                 except Exception as e:
-                    log_warn(f"中转子目录清理失败（非关键）: {staging_path} / {e}")
+                    log_warn(f"中转任务处理异常: task_id={task_id}, path={staging_path}, error={e}")
+                    with staging_lock:
+                        staging_tasks[task_id]["status"] = "failed"
+                    send_wechat_reply(
+                        task["user_id"],
+                        f"❌ 中转任务处理异常\n目标目录: {task['target_folder']}\n⚠️ 错误: {e}"
+                    )
 
         except Exception as e:
             log_warn(f"中转监控线程异常: {e}")
