@@ -831,9 +831,9 @@ def process_message_async(from_user, content):
             send_wechat_reply(
                 from_user,
                 "⚠️ 用法示例：\n"
-                f"1. 直接离线到默认目录：E808151805F0A2C8C281FBEFA682AD29EDA73FF2\n"
-                f"2. 离线到 {route_name}：/{route_name} E808151805F0A2C8C281FBEFA682AD29EDA73FF2\n"
-                f"3. 离线到自定义子目录：/{route_name} @你好 E808151805F0A2C8C281FBEFA682AD29EDA73FF2"
+                f"1. 直接离线到默认目录：E808151805F0...73FF2\n"
+                f"2. 离线到 {route_name}：/{route_name} E808151805F0...73FF2\n"
+                f"3. 离线到自定义子目录：/{route_name} @你好 E808151805F0...73FF2"
             )
             return
 
@@ -988,7 +988,7 @@ def _reply_usage_help(user_id: str):
         "支持：magnet / ed2k / http(s) 链接 / 40位 hash\n\n"
         "1. 默认目录\n"
         "直接发送链接或 hash：\n"
-        "E808151805F0A2C8C281FBEFA682AD29EDA73FF2\n\n"
+        "E808151805F0...73FF2\n\n"
         "2. 指定路由\n"
         "/sub magnet:?xt=urn:btih:...\n\n"
         "3. 指定子目录\n"
