@@ -4,11 +4,13 @@ import shutil
 import threading
 import xml.etree.ElementTree as ET
 from datetime import datetime
+import uuid
 from typing import Optional
 
 import grpc
 import requests
 import yaml
+from google.protobuf.empty_pb2 import Empty
 from flask import Flask, request
 from wechatpy.enterprise.crypto import WeChatCrypto
 
@@ -56,6 +58,36 @@ recent_msg_ids = []
 user_search_cache = {}
 DOWNLOAD_ROUTES = {}
 DEFAULT_DOWNLOAD_ROUTE = "main"
+
+
+def _parse_bool(val):
+    """安全解析 YAML / env 布尔值，支持 true/false/1/0/yes/no/on/off 和带类型标记的字符串。"""
+    s = str(val or "").strip().lower()
+    return s in ("true", "1", "yes", "on")
+
+def _validate_config():
+    """启动时校验关键配置，提前暴错避免运行时异常。"""
+    issues = []
+    for name, val in [("CORP_ID", CORP_ID), ("APP_SECRET", APP_SECRET),
+                      ("AGENT_ID", AGENT_ID), ("APP_TOKEN", APP_TOKEN),
+                      ("ENCODING_AES_KEY", ENCODING_AES_KEY)]:
+        if not (val or "").strip():
+            issues.append(f"缺少环境变量 {name}")
+    if not (CD2_HOST or "").strip():
+        issues.append("缺少环境变量 CD2_HOST")
+    if not (CD2_TOKEN or "").strip():
+        issues.append("缺少环境变量 CD2_TOKEN")
+    threshold_raw = str(JUNK_SIZE_THRESHOLD_MB or "").strip()
+    if threshold_raw:
+        try:
+            float(threshold_raw)
+        except ValueError:
+            issues.append(f"JUNK_SIZE_THRESHOLD_MB 值无效：{threshold_raw}（应为数字）")
+    if issues:
+        for msg in issues:
+            log_warn(f"配置校验失败: {msg}")
+        raise ValueError("配置校验失败: " + "; ".join(issues))
+    log_info("启动配置校验通过")
 
 
 def _ensure_routes_config():
@@ -108,8 +140,8 @@ def _load_download_routes():
             continue
         normalized_routes[name] = {
             "path": path,
-            "organize_by_date": bool(conf.get("organize_by_date", True)),
-            "allow_subdir": bool(conf.get("allow_subdir", True)),
+            "organize_by_date": _parse_bool(conf.get("organize_by_date", True)),
+            "allow_subdir": _parse_bool(conf.get("allow_subdir", True)),
             "comment": str(conf.get("comment") or "").strip(),
         }
 
@@ -132,6 +164,7 @@ def _load_download_routes():
 # Gunicorn 以 `app:app` 导入模块时不会执行 __main__，
 # 所以需要在模块导入阶段完成配置初始化。
 _load_download_routes()
+_validate_config()
 crypto = WeChatCrypto(APP_TOKEN, ENCODING_AES_KEY, CORP_ID)
 log_info("企业微信加解密模块初始化成功")
 
@@ -163,71 +196,22 @@ def _get_junk_extensions() -> set:
 
 def _get_size_threshold_mb() -> Optional[float]:
     val = str(JUNK_SIZE_THRESHOLD_MB or "").strip()
-    return float(val) if val else None
+    if not val:
+        return None
+    try:
+        return float(val)
+    except ValueError:
+        log_warn(f"JUNK_SIZE_THRESHOLD_MB 值无效，已忽略: {val}")
+        return None
 
-
-def _should_cleanup(url: str) -> tuple[bool, str]:
-    """判断是否应清洗该链接。返回 (should_cleanup, reason)。"""
-    if not ENABLE_CLEANUP:
-        return False, ""
-
-    ext_blacklist = _get_junk_extensions()
-    threshold = _get_size_threshold_mb()
-
-    filename = None
-    size_bytes = None
-
-    # --- ed2k ---
-    if url.lower().startswith("ed2k://"):
-        filename, size_bytes = _parse_ed2k_info(url)
-
-    # --- magnet ---
-    elif url.lower().startswith("magnet:?"):
-        filename, size_bytes = _parse_magnet_info(url)
-
-    if filename is None:
-        return False, ""
-
-    ext = ""
-    if "." in filename:
-        ext = filename.rsplit(".", 1)[-1].lower()
-
-    if ext not in ext_blacklist:
-        return False, ""
-
-    # 后缀命中黑名单后，再看体积
-    if threshold is not None and size_bytes is not None:
-        size_mb = size_bytes / (1024 * 1024)
-        if size_mb >= threshold:
-            return False, ""
-        reason = f"{filename} ({ext}, {size_mb:.1f}MB < {threshold}MB)"
-        return True, reason
-
-    # 配置了阈值但无法获取体积（保守策略：不清洗）
-    if threshold is not None and size_bytes is None:
-        return False, ""
-
-    # 没有配置体积阈值：直接按后缀清洗
-    reason = f"{filename} ({ext})"
-    return True, reason
-
-
-
-    if not size_bytes:
-        return "未知大小"
-    size_mb = size_bytes / (1024 * 1024)
-    if size_mb >= 1024:
-        return f"{size_mb / 1024:.2f} GB"
-    return f"{size_mb:.2f} MB"
 
 
 
 def send_wechat_reply(touser, content):
     try:
-        token_url = f"{WECHAT_PROXY}/cgi-bin/gettoken?corpid={CORP_ID}&corpsecret={APP_SECRET}"
-        token_res = requests.get(token_url, timeout=10).json()
-        access_token = token_res.get("access_token")
-        if not access_token:
+        ok, access_token, message = _get_wechat_access_token(timeout=10)
+        if not ok:
+            log_warn(f"微信回复失败: {message}")
             return
 
         send_url = f"{WECHAT_PROXY}/cgi-bin/message/send?access_token={access_token}"
@@ -274,6 +258,19 @@ def _get_available_routes_text() -> str:
     return "、".join(f"/{name}" for name in DOWNLOAD_ROUTES.keys())
 
 
+def _get_wechat_access_token(timeout: int = 10) -> tuple[bool, str, str]:
+    """获取企微 access_token，返回 (ok, token, message)。"""
+    try:
+        token_url = f"{WECHAT_PROXY}/cgi-bin/gettoken?corpid={CORP_ID}&corpsecret={APP_SECRET}"
+        token_res = requests.get(token_url, timeout=timeout).json()
+        access_token = token_res.get("access_token")
+        if access_token:
+            return True, access_token, "企微 access_token 获取成功"
+        err = token_res.get("errmsg") or token_res.get("errcode") or "未知错误"
+        return False, "", f"企微 access_token 获取失败: {err}"
+    except Exception as e:
+        return False, "", f"企微 access_token 请求异常: {e}"
+
 
 def _cd2_create_folder(folder_path):
     if not CD2_TOKEN:
@@ -290,9 +287,16 @@ def _cd2_create_folder(folder_path):
         stub = clouddrive_pb2_grpc.CloudDriveFileSrvStub(channel)
         metadata = [("authorization", f"Bearer {CD2_TOKEN}")]
         req = clouddrive_pb2.CreateFolderRequest(parentPath=parent_path, folderName=folder_name)
-        stub.CreateFolder(req, metadata=metadata, timeout=10)
-        log_info(f"CD2 目录创建成功: {folder_path}")
-        return True
+        res = stub.CreateFolder(req, metadata=metadata, timeout=10)
+        if res.result.success:
+            log_info(f"CD2 目录创建成功: {folder_path}")
+            return True
+        error_message = res.result.errorMessage or ""
+        if "exist" in error_message.lower() or "已存在" in error_message or "存在" in error_message:
+            log_info(f"CD2 目录已存在: {folder_path}")
+            return True
+        log_warn(f"CD2 创建目录返回失败: {folder_path} / {error_message}")
+        return False
     except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.ALREADY_EXISTS:
             log_info(f"CD2 目录已存在: {folder_path}")
@@ -584,6 +588,11 @@ def _staging_cleanup_worker():
                         task["user_id"],
                         f"❌ 中转任务失败\n目标目录: {task['target_folder']}\n⚠️ 有离线任务出错，请检查 CD2 后台。"
                     )
+                    try:
+                        _cd2_delete_file(staging_path)
+                        log_info(f"失败中转子目录已清理: {staging_path}")
+                    except Exception as e:
+                        log_warn(f"失败中转子目录清理失败（非关键）: {staging_path} / {e}")
                     continue
 
                 if not all_finished:
@@ -596,9 +605,15 @@ def _staging_cleanup_worker():
                 # 处理任务（逐个文件有 5 秒间隔，可能耗时较长）
                 _process_staging_task(task)
 
-                # 标记完成
+                # 标记完成，并清理空中转子目录
                 with staging_lock:
                     staging_tasks[task_id]["status"] = "completed"
+                # 尝试删除已清空的中转子目录
+                try:
+                    _cd2_delete_file(staging_path)
+                    log_info(f"中转子目录已清理: {staging_path}")
+                except Exception as e:
+                    log_warn(f"中转子目录清理失败（非关键）: {staging_path} / {e}")
 
         except Exception as e:
             log_warn(f"中转监控线程异常: {e}")
@@ -752,6 +767,14 @@ def process_message_async(from_user, content):
         _reply_staging_tasks(from_user)
         return
 
+    if content.lower() in ("/help", "help", "使用说明"):
+        _reply_usage_help(from_user)
+        return
+
+    if content.lower() in ("/health", "/check", "健康检查"):
+        _reply_health_check(from_user)
+        return
+
     if content.startswith("/") and len(content.split()) == 1:
         route_name = content[1:].strip().lower()
         if _get_route_config(route_name):
@@ -812,34 +835,43 @@ def process_message_async(from_user, content):
             mag_success = 0
             mag_fail = 0
             mag_fail_reasons = []
+            task_subfolder = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}"
+            staging_sub_path = _join_path(STAGING_FOLDER, task_subfolder)
+            _cd2_ensure_folder_recursive(staging_sub_path)
             for target_url in magnet_urls:
-                success, detail = cd2_offline_download(target_url, target_folder=STAGING_FOLDER)
+                success, detail = cd2_offline_download(target_url, target_folder=staging_sub_path)
                 if success:
                     mag_success += 1
                 else:
                     mag_fail += 1
                     mag_fail_reasons.append(detail)
 
-            task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            with staging_lock:
-                staging_tasks[task_id] = {
-                    "urls": magnet_urls,
-                    "target_folder": target_folder,
-                    "user_id": from_user,
-                    "status": "pending",
-                    "staging_path": STAGING_FOLDER,
-                    "submitted_at": datetime.now().isoformat(),
-                }
-            staging_task_id = task_id
+            if mag_success == 0:
+                log_warn(f"magnet 提交全部失败: {mag_fail_reasons[0] if mag_fail_reasons else '未知错误'}")
+            else:
+                task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}"
+                with staging_lock:
+                    staging_tasks[task_id] = {
+                        "urls": magnet_urls,
+                        "target_folder": target_folder,
+                        "user_id": from_user,
+                        "status": "pending",
+                        "staging_path": staging_sub_path,
+                        "submitted_at": datetime.now().isoformat(),
+                    }
+                staging_task_id = task_id
 
-            extra = f"\n📂 子目录: {parsed['custom_subdir']}" if parsed["custom_subdir"] else ""
-            send_wechat_reply(
-                from_user,
-                f"📦 已提交到中转目录\n"
-                f"📦 magnet 数量: {mag_success}{extra}\n"
-                f"🤖 中转路径: {STAGING_FOLDER}\n"
-                f"⏳ 下载完成后自动清洗并转存到目标目录..."
-            )
+                extra = f"\n📂 子目录: {parsed['custom_subdir']}" if parsed["custom_subdir"] else ""
+                fail_note = ""
+                if mag_fail > 0:
+                    fail_note = f"\n⚠️ magnet 提交失败: {mag_fail} 个"
+                send_wechat_reply(
+                    from_user,
+                    f"📦 已提交到中转目录\n"
+                    f"📦 magnet 成功: {mag_success}/{len(magnet_urls)}{extra}{fail_note}\n"
+                    f"🤖 中转路径: {staging_sub_path}\n"
+                    f"⏳ 下载完成后自动清洗并转存到目标目录..."
+                )
         elif magnet_urls:
             # 没配置 STAGING_FOLDER，magnet 直接提交
             mag_success = 0
@@ -857,7 +889,7 @@ def process_message_async(from_user, content):
             mag_fail = 0
             mag_fail_reasons = []
 
-        # 统一回复 ed2k 结果（magnet 中转的回复已单独发出）
+        # 统一回复提交结果
         extra = f"\n📂 子目录: {parsed['custom_subdir']}" if parsed["custom_subdir"] else ""
         total_ed2k = len(ed2k_urls)
         total_mag = len(magnet_urls)
@@ -866,31 +898,28 @@ def process_message_async(from_user, content):
             send_wechat_reply(from_user, "⚠️ 没有可提交的链接。")
             return
 
-        # 只有 ed2k 且无中转任务时，才在这里回复
-        if ed2k_urls and not staging_task_id:
-            if ed2k_fail == 0:
-                send_wechat_reply(
-                    from_user,
-                    f"✅ 离线任务建立成功\n"
-                    f"📦 ed2k 提交数量: {ed2k_success}{extra}\n"
-                    f"🤖 状态: 提交成功 → {target_folder}"
-                )
+        parts = []
+        if ed2k_urls:
+            if ed2k_fail == 0 and ed2k_success == total_ed2k:
+                parts.append(f"📦 ed2k: ✅ {ed2k_success}/{total_ed2k}")
             elif ed2k_success == 0:
-                send_wechat_reply(
-                    from_user,
-                    f"❌ 离线任务失败\n"
-                    f"📦 ed2k 数量: {total_ed2k}{extra}\n"
-                    f"⚠️ 原因: {ed2k_fail_reasons[0] if ed2k_fail_reasons else '未知错误'}"
-                )
+                parts.append(f"📦 ed2k: ❌ {total_ed2k}/{total_ed2k} — {ed2k_fail_reasons[0] if ed2k_fail_reasons else '未知错误'}")
             else:
-                send_wechat_reply(
-                    from_user,
-                    f"⚠️ 部分离线成功\n"
-                    f"✅ ed2k 成功: {ed2k_success}\n"
-                    f"❌ ed2k 失败: {ed2k_fail}{extra}\n"
-                    f"🤖 目标目录: {target_folder}\n"
-                    f"⚠️ 首个失败原因: {ed2k_fail_reasons[0] if ed2k_fail_reasons else '未知错误'}"
-                )
+                parts.append(f"📦 ed2k: ⚠️ 成功 {ed2k_success} / 失败 {ed2k_fail} — {ed2k_fail_reasons[0] if ed2k_fail_reasons else ''}")
+
+        if magnet_urls and not staging_task_id:
+            if mag_fail == 0 and mag_success == total_mag:
+                parts.append(f"📦 链接: ✅ {mag_success}/{total_mag}")
+            elif mag_success == 0:
+                parts.append(f"📦 链接: ❌ {total_mag}/{total_mag} — {mag_fail_reasons[0] if mag_fail_reasons else '未知错误'}")
+            else:
+                parts.append(f"📦 链接: ⚠️ 成功 {mag_success} / 失败 {mag_fail} — {mag_fail_reasons[0] if mag_fail_reasons else ''}")
+
+        if parts:
+            send_wechat_reply(
+                from_user,
+                "\n".join(parts) + f"\n🤖 目标目录: {target_folder}{extra}"
+            )
         return
 
     send_wechat_reply(
@@ -898,6 +927,121 @@ def process_message_async(from_user, content):
         "⚠️ 当前版本仅支持直接离线链接，不再提供搜索功能。\n"
         "请发送 magnet / ed2k / http(s) / 40位hash，或使用 /路由名 + 链接。"
     )
+
+
+def _reply_usage_help(user_id: str):
+    """回复简短使用说明。"""
+    routes_text = _get_available_routes_text() or "未配置"
+    send_wechat_reply(
+        user_id,
+        "📖 CD2 转存使用说明\n\n"
+        "支持：magnet / ed2k / http(s) 链接 / 40位 hash\n\n"
+        "1. 默认目录\n"
+        "直接发送链接或 hash：\n"
+        "E808151805F0A2C8C281FBEFA682AD29EDA73FF2\n\n"
+        "2. 指定路由\n"
+        "/sub magnet:?xt=urn:btih:...\n\n"
+        "3. 指定子目录\n"
+        "/sub @电影名 magnet:?xt=urn:btih:...\n\n"
+        "4. 批量提交\n"
+        "/sub @电影名\n"
+        "magnet:?xt=urn:btih:...\n"
+        "ed2k://|file|xxx.mkv|123456|HASH|/\n\n"
+        "5. 查询任务\n"
+        "/tasks\n\n"
+        f"可用路由：{routes_text}"
+    )
+
+
+def _format_check(ok: bool, name: str, detail: str = "") -> str:
+    icon = "✅" if ok else "❌"
+    return f"{icon} {name}" + (f"：{detail}" if detail else "")
+
+
+def _run_health_checks() -> list[str]:
+    """执行只读健康检查，返回适合发给企微的行列表。"""
+    lines = ["🩺 CD2 转存机器人健康检查"]
+
+    # 配置检查
+    required_env = {
+        "CORP_ID": CORP_ID,
+        "APP_SECRET": APP_SECRET,
+        "AGENT_ID": AGENT_ID,
+        "APP_TOKEN": APP_TOKEN,
+        "ENCODING_AES_KEY": ENCODING_AES_KEY,
+        "CD2_HOST": CD2_HOST,
+        "CD2_TOKEN": CD2_TOKEN,
+    }
+    missing = [name for name, val in required_env.items() if not str(val or "").strip()]
+    lines.append(_format_check(not missing, "环境变量", "完整" if not missing else "缺少 " + ", ".join(missing)))
+
+    threshold_raw = str(JUNK_SIZE_THRESHOLD_MB or "").strip()
+    threshold_ok = True
+    threshold_detail = "未设置"
+    if threshold_raw:
+        try:
+            float(threshold_raw)
+            threshold_detail = threshold_raw
+        except ValueError:
+            threshold_ok = False
+            threshold_detail = f"无效值 {threshold_raw}"
+    lines.append(_format_check(threshold_ok, "清洗体积阈值", threshold_detail))
+
+    route_count = len(DOWNLOAD_ROUTES)
+    default_ok = DEFAULT_DOWNLOAD_ROUTE in DOWNLOAD_ROUTES
+    route_detail = f"{route_count} 个路由，默认 /{DEFAULT_DOWNLOAD_ROUTE}" if default_ok else f"默认路由无效: {DEFAULT_DOWNLOAD_ROUTE}"
+    lines.append(_format_check(route_count > 0 and default_ok, "下载路由配置", route_detail))
+
+    bad_routes = [name for name, conf in DOWNLOAD_ROUTES.items() if not str(conf.get("path") or "").strip().startswith("/")]
+    lines.append(_format_check(not bad_routes, "路由路径", "均为绝对路径" if not bad_routes else "异常: " + ", ".join(bad_routes)))
+    lines.append(_format_check(bool(STAGING_FOLDER), "中转清洗目录", STAGING_FOLDER or "未启用"))
+
+    # CD2 网络 / 服务检查
+    try:
+        channel = grpc.insecure_channel(CD2_HOST)
+        stub = clouddrive_pb2_grpc.CloudDriveFileSrvStub(channel)
+        info = stub.GetSystemInfo(Empty(), timeout=5)
+        user = getattr(info, "UserName", "") or getattr(info, "userName", "") or getattr(info, "username", "") or "已连接"
+        ready = getattr(info, "SystemReady", None)
+        detail = str(user) if ready is None else f"{user} / SystemReady={ready}"
+        lines.append(_format_check(True, "CD2 服务连接", detail))
+    except grpc.RpcError as e:
+        lines.append(_format_check(False, "CD2 服务连接", f"{e.code().name}: {e.details()}"))
+    except Exception as e:
+        lines.append(_format_check(False, "CD2 服务连接", str(e)))
+
+    # CD2 Token 授权检查（只读）
+    if CD2_TOKEN:
+        try:
+            channel = grpc.insecure_channel(CD2_HOST)
+            stub = clouddrive_pb2_grpc.CloudDriveFileSrvStub(channel)
+            metadata = [("authorization", f"Bearer {CD2_TOKEN}")]
+            stub.GetAccountStatus(Empty(), metadata=metadata, timeout=5)
+            lines.append(_format_check(True, "CD2 Token 授权", "可用"))
+        except grpc.RpcError as e:
+            lines.append(_format_check(False, "CD2 Token 授权", f"{e.code().name}: {e.details()}"))
+        except Exception as e:
+            lines.append(_format_check(False, "CD2 Token 授权", str(e)))
+
+    # 企微 API 检查
+    ok, _, message = _get_wechat_access_token(timeout=5)
+    lines.append(_format_check(ok, "企微 API", message))
+
+    with staging_lock:
+        active = sum(1 for task in staging_tasks.values() if task.get("status") in ("pending", "processing"))
+    lines.append(_format_check(True, "中转任务", f"进行中 {active} 个"))
+
+    return lines
+
+
+def _reply_health_check(user_id: str):
+    """执行健康检查并回复。"""
+    try:
+        lines = _run_health_checks()
+        send_wechat_reply(user_id, "\n".join(lines))
+    except Exception as e:
+        log_warn(f"健康检查异常: {e}")
+        send_wechat_reply(user_id, f"❌ 健康检查异常：{e}")
 
 
 @app.route("/wechat", methods=["GET", "POST"])
@@ -957,6 +1101,10 @@ def wechat_callback():
                     log_info(f"收到企微菜单事件: event={event}, key={event_key}, from={from_user}")
                     if event == "click" and event_key == "status":
                         _reply_staging_tasks(from_user)
+                    elif event == "click" and event_key == "help":
+                        _reply_usage_help(from_user)
+                    elif event == "click" and event_key == "health":
+                        threading.Thread(target=_reply_health_check, args=(from_user,), daemon=True).start()
                 else:
                     log_warn("企微事件消息缺少 Event 或 EventKey 节点")
             else:
@@ -974,11 +1122,9 @@ def wechat_callback():
 def init_wechat_menu():
     """尝试自动初始化企业微信应用自定义菜单。"""
     try:
-        token_url = f"{WECHAT_PROXY}/cgi-bin/gettoken?corpid={CORP_ID}&corpsecret={APP_SECRET}"
-        token_res = requests.get(token_url, timeout=10).json()
-        access_token = token_res.get("access_token")
-        if not access_token:
-            log_warn("企微菜单初始化失败：无法获取 access_token")
+        ok, access_token, message = _get_wechat_access_token(timeout=10)
+        if not ok:
+            log_warn(f"企微菜单初始化失败：{message}")
             return
 
         menu_data = {
@@ -987,6 +1133,16 @@ def init_wechat_menu():
                     "type": "click",
                     "name": "任务状态",
                     "key": "status"
+                },
+                {
+                    "type": "click",
+                    "name": "使用说明",
+                    "key": "help"
+                },
+                {
+                    "type": "click",
+                    "name": "健康检查",
+                    "key": "health"
                 }
             ]
         }
@@ -994,7 +1150,7 @@ def init_wechat_menu():
         menu_url = f"{WECHAT_PROXY}/cgi-bin/menu/create?access_token={access_token}&agentid={AGENT_ID}"
         res = requests.post(menu_url, json=menu_data, timeout=10).json()
         if res.get("errcode") == 0:
-            log_info("企微应用菜单初始化成功：任务状态")
+            log_info("企微应用菜单初始化成功：任务状态 / 使用说明 / 健康检查")
         elif res.get("errcode") == 46003:
             log_info("企微应用菜单已存在，无需重复创建")
         else:
